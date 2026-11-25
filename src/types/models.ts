@@ -46,7 +46,7 @@ export type AccountSortOption =
   | 'NAME_DESC'
   | 'TYPE';
 
-export type PrimaryTab = 'HOME' | 'ACTIVITY' | 'PLAN' | 'INSIGHTS';
+export type PrimaryTab = 'HOME' | 'REPORT' | 'SETTINGS';
 
 export type SubScreen =
   | 'ACCOUNTS'
@@ -75,7 +75,8 @@ export type SubScreen =
   | 'MONTHLY_RECAP'
   | 'SPENDING_COMPARISON'
   | 'INCOME_TRACKER'
-  | 'CALENDAR';
+  | 'CALENDAR'
+  | 'CARDS_MANAGER';
 
 export interface AccountEntity {
   id: string;
@@ -192,7 +193,7 @@ export interface AppSettingsEntity {
   notificationsEnabled: boolean;
 }
 
-export type HomeCardStyle = 'STACK' | 'CAROUSEL';
+export type HomeCardStyle = 'GRID' | 'STACK' | 'CAROUSEL';
 export type BalanceCardStyle = 'STANDARD' | 'GRADIENT';
 export type HomeSectionKey =
   | 'budget'
@@ -213,6 +214,11 @@ export interface HomeCustomization {
   visibleSections: HomeSectionKey[];
 }
 
+export interface SpendingWayItem {
+  id: string;
+  name: string;
+}
+
 export interface ExtendedSettingsState {
   profileAvatarId: string;
   profileAvatarBgHex: string;
@@ -229,6 +235,7 @@ export interface ExtendedSettingsState {
   screenLockPin: string;
   customBanks: string[];
   customMfsProviders: Array<{ name: string; brandColorHex: string }>;
+  spendingWays?: SpendingWayItem[];
 }
 
 export interface CloudBackupInfo {

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Wifi, Landmark, Smartphone, Banknote, CreditCard } from 'lucide-react';
+import { Wifi, Landmark, Smartphone, Banknote, CreditCard, SlidersHorizontal } from 'lucide-react';
 import type { AccountEntity, AppLanguage } from '../types/models';
 import {
   getCardNetworkLogoPath,
@@ -50,16 +50,25 @@ export function HishabPatiAccountCard({
   currencySymbol,
   language,
   onClick,
+  onQuickEdit,
+  monthlyIn,
+  monthlyOut,
   compact = false,
+  minimalBalanceOnly = false,
   className = '',
 }: {
   account: AccountEntity;
   currencySymbol: string;
   language: AppLanguage;
   onClick?: () => void;
+  onQuickEdit?: () => void;
+  monthlyIn?: number;
+  monthlyOut?: number;
   compact?: boolean;
+  minimalBalanceOnly?: boolean;
   className?: string;
 }) {
+  const isBn = language === 'BANGLA';
   const meta = parseAccountNotesMetadata(account.notes);
   const baseHex = account.colorHex || '#0284C7';
   const mfsLogo = getMfsLogoPath(account.institution || account.name);
@@ -81,17 +90,36 @@ export function HishabPatiAccountCard({
       ? Math.min(100, (Math.max(0, account.balance < 0 ? -account.balance : 0) / account.creditLimit) * 100)
       : 0;
 
+  const hasFlowInfo = !minimalBalanceOnly && (monthlyIn !== undefined || monthlyOut !== undefined);
+
   return (
     <div
       onClick={onClick}
-      className={`relative overflow-hidden rounded-[22px] text-white select-none ${
-        compact ? 'p-4 min-h-[146px]' : 'p-5 min-h-[178px]'
+      className={`relative overflow-hidden text-white select-none flex flex-col justify-between ${
+        minimalBalanceOnly
+          ? 'aspect-[1.586/1] w-full rounded-[22px] p-5 sm:p-6 border border-white/25'
+          : compact
+          ? 'rounded-[22px] p-4 min-h-[162px]'
+          : 'rounded-[22px] p-5 min-h-[188px]'
       } ${onClick ? 'cursor-pointer active:scale-[0.985] transition-transform' : ''} ${className}`}
       style={{
-        background: `linear-gradient(135deg, ${baseHex} 0%, ${hexToRgba(baseHex, 0.85)} 55%, #0F172A 125%)`,
-        boxShadow: `0 14px 32px -10px ${hexToRgba(baseHex, 0.52)}`,
+        background: `linear-gradient(135deg, ${baseHex} 0%, ${hexToRgba(baseHex, 0.88)} 52%, #0F172A 132%)`,
+        boxShadow: minimalBalanceOnly
+          ? `0 20px 38px -12px ${hexToRgba(baseHex, 0.55)}, inset 0 1px 0 rgba(255,255,255,0.32)`
+          : `0 14px 32px -10px ${hexToRgba(baseHex, 0.48)}`,
       }}
     >
+      {/* Subtle diagonal card gloss sheen */}
+      {minimalBalanceOnly && (
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{
+            background:
+              'linear-gradient(120deg, rgba(255,255,255,0.22) 0%, rgba(255,255,255,0.04) 38%, rgba(255,255,255,0) 60%)',
+          }}
+        />
+      )}
+
       {/* Bespoke Category Surface Texture */}
       <svg className="absolute inset-0 w-full h-full pointer-events-none opacity-25" viewBox="0 0 400 220" preserveAspectRatio="none">
         {isCredit && (
@@ -127,34 +155,53 @@ export function HishabPatiAccountCard({
       {/* Top Row: Identity + Brand */}
       <div className="relative z-10 flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10.5px] uppercase tracking-wider font-bold text-white/80">
-              {isCredit
-                ? t('credit_card_label', language)
-                : isMfs
-                ? t('mobile_wallet', language)
-                : isCash
-                ? t('cash_in_hand', language)
-                : meta.subtype || t('debit_card_label', language)}
-            </span>
-            {account.accountNumberLast4 && (
-              <span className="text-[10.5px] font-mono-num text-white/75">
-                ••{account.accountNumberLast4}
+          {!minimalBalanceOnly && (
+            <div className="flex items-center gap-1.5 text-[10.5px] font-bold text-white/80">
+              <span className="uppercase tracking-wider">
+                {isCredit
+                  ? t('credit_card_label', language)
+                  : isMfs
+                  ? t('mobile_wallet', language)
+                  : isCash
+                  ? t('cash_in_hand', language)
+                  : meta.subtype || t('debit_card_label', language)}
               </span>
-            )}
-          </div>
-          <h3 className="text-[15.5px] font-bold tracking-tight truncate mt-0.5">
+              {account.accountNumberLast4 && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-mono-num text-white/80">
+                    •••• {account.accountNumberLast4}
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+          <h3 className={`${minimalBalanceOnly ? 'text-lg sm:text-xl' : 'text-[16px]'} font-bold tracking-tight truncate mt-0.5`}>
             {account.name}
           </h3>
-          {account.institution && !isCash && (
-            <p className="text-[11px] text-white/75 truncate">{account.institution}</p>
+          {account.institution && !isCash && account.institution.toLowerCase() !== account.name.toLowerCase() && (
+            <p className="text-[11px] sm:text-xs text-white/75 truncate">{account.institution}</p>
           )}
         </div>
 
-        <div className="shrink-0 flex items-center gap-2">
+        <div className="shrink-0 flex items-center gap-1.5">
+          {!minimalBalanceOnly && onQuickEdit && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onQuickEdit();
+              }}
+              aria-label={isBn ? 'কার্ড ও ব্যালেন্স পরিবর্তন' : 'Edit card & balance'}
+              title={isBn ? 'ব্যালেন্স / কার্ড পরিবর্তন' : 'Edit balance / card'}
+              className="w-8 h-8 rounded-xl bg-white/15 hover:bg-white/25 flex items-center justify-center text-white transition"
+            >
+              <SlidersHorizontal size={14} />
+            </button>
+          )}
           {isMfs && mfsLogo ? (
-            <img src={mfsLogo} alt={account.institution || account.name} className="h-7 w-auto object-contain rounded" />
-          ) : netLogo ? (
+            <img src={mfsLogo} alt={account.institution || account.name} className="h-7 w-auto object-contain rounded-lg bg-white/95 p-0.5 shadow-sm" />
+          ) : netLogo && !minimalBalanceOnly ? (
             <img src={netLogo} alt={meta.network} className="h-5 w-auto object-contain" />
           ) : isCredit ? (
             <CreditCard size={20} className="text-white/85" />
@@ -168,32 +215,42 @@ export function HishabPatiAccountCard({
         </div>
       </div>
 
-      {/* Middle Hardware Row (EMV + NFC ONLY for Debit/Credit) */}
-      {(isCredit || isBank) && !compact && (
-        <div className="relative z-10 flex items-center gap-2.5 mt-3">
+      {/* Subtle Chip + Contactless mark on physical minimal card */}
+      {minimalBalanceOnly && (isBank || isCredit) && (
+        <div className="relative z-10 flex items-center gap-2 opacity-90">
           <EmvChipSvg style={isCredit ? 'GOLD' : 'SILVER_GOLD'} />
-          <Wifi size={16} className="rotate-90 text-white/70" />
-          {isCredit && (
-            <span className="ml-auto w-7 h-4 rounded bg-gradient-to-br from-cyan-200/70 via-pink-200/50 to-amber-200/70 border border-white/40" />
+          <Wifi size={14} className="rotate-90 text-white/75" />
+        </div>
+      )}
+
+      {/* Middle Hardware Row (EMV + NFC for Bank/Credit when not minimal) */}
+      {!minimalBalanceOnly && (isCredit || isBank) && (
+        <div className="relative z-10 flex items-center gap-2.5 mt-2.5">
+          <EmvChipSvg style={isCredit ? 'GOLD' : 'SILVER_GOLD'} />
+          <Wifi size={15} className="rotate-90 text-white/70" />
+          {!compact && account.accountNumberLast4 && (
+            <span className="ml-auto text-xs font-mono-num tracking-widest text-white/80">
+              •••• •••• •••• {account.accountNumberLast4}
+            </span>
           )}
         </div>
       )}
 
-      {/* Bottom Row: Balance & Credit Limit Progress */}
-      <div className={`relative z-10 ${compact ? 'mt-4' : 'mt-5'} flex items-end justify-between gap-2`}>
-        <div>
-          <p className="text-[10px] uppercase tracking-wider font-semibold text-white/75">
-            {isCredit ? t('outstanding_caps', language) : t('balance_caps', language)}
+      {/* Bottom Row: Balance */}
+      <div className={`relative z-10 ${minimalBalanceOnly ? 'mt-auto' : compact ? 'mt-3' : 'mt-5'} flex items-end justify-between gap-2`}>
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold text-white/75">
+            {isBn ? 'বর্তমান ব্যালেন্স' : 'Current Balance'}
           </p>
-          <p className={`${compact ? 'text-[20px]' : 'text-[23px]'} font-extrabold font-mono-num leading-tight mt-0.5`}>
+          <p className={`${minimalBalanceOnly ? 'text-2xl sm:text-3xl' : compact ? 'text-[20px]' : 'text-[23px]'} font-extrabold font-mono-num leading-tight mt-0.5 tabular-nums`}>
             {formatCurrency(displayBalance, currencySymbol, language)}
           </p>
         </div>
 
-        {isCredit && account.creditLimit > 0 && (
-          <div className="text-right min-w-[100px]">
-            <p className="text-[10px] text-white/80 font-medium">
-              {Math.round(utilization)}% • {formatCurrency(account.creditLimit, currencySymbol, language)}
+        {!minimalBalanceOnly && isCredit && account.creditLimit > 0 ? (
+          <div className="text-right min-w-[96px]">
+            <p className="text-[10px] text-white/80 font-medium font-mono-num">
+              {Math.round(utilization)}% · {formatCurrency(account.creditLimit, currencySymbol, language)}
             </p>
             <div className="w-24 h-1.5 rounded-full bg-white/25 overflow-hidden mt-1 ml-auto">
               <div
@@ -202,7 +259,16 @@ export function HishabPatiAccountCard({
               />
             </div>
           </div>
-        )}
+        ) : hasFlowInfo ? (
+          <div className="text-right text-[10.5px] font-mono-num space-y-0.5 shrink-0">
+            <p className="text-emerald-200 font-semibold">
+              {isBn ? 'ইন' : 'In'}: +{formatCurrency(monthlyIn ?? 0, currencySymbol, language)}
+            </p>
+            <p className="text-rose-200 font-semibold">
+              {isBn ? 'আউট' : 'Out'}: -{formatCurrency(monthlyOut ?? 0, currencySymbol, language)}
+            </p>
+          </div>
+        ) : null}
       </div>
     </div>
   );

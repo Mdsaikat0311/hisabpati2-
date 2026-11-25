@@ -7,41 +7,8 @@ import { FloatingBottomNav } from './components/FloatingBottomNav';
 import { SnackbarToast } from './components/GlassPrimitives';
 import { AuthScreen } from './screens/AuthScreen';
 import { HomeScreen } from './screens/HomeScreen';
-import { ActivityScreen } from './screens/ActivityScreen';
-import { PlanScreen } from './screens/PlanScreen';
-import { InsightsScreen } from './screens/InsightsScreen';
-import { AccountsScreen } from './screens/AccountsScreen';
-import { AccountDetailScreen } from './screens/AccountDetailScreen';
-import { EditAccountScreen } from './screens/EditAccountScreen';
-import { AdjustBalanceScreen } from './screens/AdjustBalanceScreen';
-import { AddTransactionScreen } from './screens/AddTransactionScreen';
-import { BudgetDashboardScreen } from './screens/BudgetDashboardScreen';
-import { AddBudgetScreen } from './screens/AddBudgetScreen';
-import {
-  AddDebtScreen,
-  AddDebtTransactionScreen,
-  DebtDetailsScreen,
-  ManageDebtsScreen,
-} from './screens/DebtsScreens';
-import { NewSavingsGoalScreen } from './screens/NewSavingsGoalScreen';
-import {
-  CalendarScreen,
-  CurrencyConverterScreen,
-  IncomeTrackerScreen,
-  MonthlyRecapScreen,
-  SpendingComparisonScreen,
-} from './screens/PlanToolsScreens';
+import { ReportScreen } from './screens/ReportScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
-import { ProfileScreen } from './screens/ProfileScreen';
-import { ThemeScreen } from './screens/ThemeScreen';
-import { CategoriesScreen } from './screens/CategoriesScreen';
-import { CurrencySelectionScreen } from './screens/CurrencySelectionScreen';
-import { BackupRestoreScreen } from './screens/BackupRestoreScreen';
-import {
-  AboutScreen,
-  NotificationManagerScreen,
-  NotificationsScreen,
-} from './screens/NotificationsScreens';
 
 function PinLockGate() {
   const { unlockApp, settings } = useWallet();
@@ -103,14 +70,7 @@ function PinLockGate() {
 }
 
 function AppShell() {
-  const {
-    authUser,
-    authReady,
-    guestMode,
-    isLocked,
-    activeTab,
-    currentSubScreen,
-  } = useWallet();
+  const { authUser, authReady, guestMode, isLocked, activeTab } = useWallet();
 
   if (isLocked) {
     return (
@@ -138,89 +98,14 @@ function AppShell() {
     return <AuthScreen />;
   }
 
-  const renderSubScreen = () => {
-    if (!currentSubScreen) return null;
-    const params = currentSubScreen.params ?? {};
-    switch (currentSubScreen.screen) {
-      case 'ACCOUNTS':
-        return <AccountsScreen />;
-      case 'ACCOUNT_DETAIL':
-        return <AccountDetailScreen accountId={params.accountId || ''} />;
-      case 'EDIT_ACCOUNT':
-        return <EditAccountScreen accountId={params.accountId} />;
-      case 'ADJUST_BALANCE':
-        return <AdjustBalanceScreen accountId={params.accountId || ''} />;
-      case 'ADD_TRANSACTION':
-        return <AddTransactionScreen />;
-      case 'BUDGET_DASHBOARD':
-      case 'BUDGET_DETAILS':
-        return <BudgetDashboardScreen />;
-      case 'ADD_BUDGET':
-        return (
-          <AddBudgetScreen
-            budgetId={params.budgetId}
-            initialCategoryName={params.categoryName}
-            initialOverall={params.isOverall === 'true'}
-          />
-        );
-      case 'MANAGE_DEBTS':
-        return <ManageDebtsScreen />;
-      case 'DEBT_DETAILS':
-        return <DebtDetailsScreen debtId={params.debtId || ''} />;
-      case 'ADD_DEBT':
-        return <AddDebtScreen />;
-      case 'ADD_DEBT_TRANSACTION':
-        return <AddDebtTransactionScreen debtId={params.debtId || ''} />;
-      case 'NEW_SAVINGS_GOAL':
-        return <NewSavingsGoalScreen />;
-      case 'CURRENCY_CONVERTER':
-        return <CurrencyConverterScreen />;
-      case 'MONTHLY_RECAP':
-        return <MonthlyRecapScreen />;
-      case 'SPENDING_COMPARISON':
-        return <SpendingComparisonScreen />;
-      case 'INCOME_TRACKER':
-        return <IncomeTrackerScreen />;
-      case 'CALENDAR':
-        return <CalendarScreen />;
-      case 'SETTINGS':
-        return <SettingsScreen />;
-      case 'PROFILE':
-        return <ProfileScreen />;
-      case 'THEME':
-        return <ThemeScreen />;
-      case 'CATEGORIES':
-        return <CategoriesScreen />;
-      case 'CURRENCY_SELECTION':
-        return <CurrencySelectionScreen />;
-      case 'BACKUP_RESTORE':
-        return <BackupRestoreScreen />;
-      case 'NOTIFICATIONS':
-        return <NotificationsScreen />;
-      case 'NOTIFICATION_MANAGER':
-        return <NotificationManagerScreen />;
-      case 'ABOUT':
-        return <AboutScreen />;
-      default:
-        return null;
-    }
-  };
-
   return (
     <div className="relative min-h-screen text-slate-900 dark:text-slate-100">
       <BackgroundLayer />
       <main className="relative z-10">
-        {currentSubScreen ? (
-          renderSubScreen()
-        ) : (
-          <>
-            {activeTab === 'HOME' && <HomeScreen />}
-            {activeTab === 'ACTIVITY' && <ActivityScreen />}
-            {activeTab === 'PLAN' && <PlanScreen />}
-            {activeTab === 'INSIGHTS' && <InsightsScreen />}
-            <FloatingBottomNav />
-          </>
-        )}
+        {activeTab === 'HOME' && <HomeScreen />}
+        {activeTab === 'REPORT' && <ReportScreen />}
+        {activeTab === 'SETTINGS' && <SettingsScreen />}
+        <FloatingBottomNav />
       </main>
       <SnackbarToast />
     </div>

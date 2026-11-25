@@ -3,6 +3,10 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendEmailVerification,
+  sendPasswordResetEmail,
   signOut,
   onAuthStateChanged,
   type User,
@@ -103,6 +107,37 @@ export function subscribeAuthState(callback: (user: User | null) => void): () =>
 export async function signInWithGooglePopup(): Promise<User> {
   const result = await signInWithPopup(auth, googleProvider);
   return result.user;
+}
+
+export async function signInWithEmailPassword(email: string, password: string): Promise<User> {
+  const result = await signInWithEmailAndPassword(auth, email.trim(), password);
+  return result.user;
+}
+
+export async function registerWithEmailPassword(email: string, password: string): Promise<User> {
+  const result = await createUserWithEmailAndPassword(auth, email.trim(), password);
+  if (!result.user.emailVerified) {
+    await sendEmailVerification(result.user);
+  }
+  return result.user;
+}
+
+export async function resendVerificationEmail(): Promise<void> {
+  if (!auth.currentUser) {
+    throw new Error('No signed-in user found.');
+  }
+  await sendEmailVerification(auth.currentUser);
+}
+
+export async function sendPasswordReset(email: string): Promise<void> {
+  await sendPasswordResetEmail(auth, email.trim());
+}
+
+export async function reloadCurrentUser(): Promise<User | null> {
+  if (!auth.currentUser) return null;
+  await auth.currentUser.reload();
+  await auth.currentUser.getIdToken(true);
+  return auth.currentUser;
 }
 
 export async function signOutGoogle(): Promise<void> {

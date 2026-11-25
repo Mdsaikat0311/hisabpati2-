@@ -6,9 +6,12 @@ import {
   Trash2,
   ChevronRight,
   Repeat,
+  Tag,
+  Wallet,
 } from 'lucide-react';
 import { useWallet } from '../context/WalletContext';
 import { t } from '../data/appStrings';
+import { QUICK_SUBCATEGORY_PRESETS } from '../data/initialData';
 import { evaluateExpression, formatCalculatorDisplay } from '../utils/calculator';
 import { formatCurrency } from '../utils/formatters';
 import { SubScreenHeader, TranslucentCard } from '../components/GlassPrimitives';
@@ -24,6 +27,7 @@ export function AddTransactionScreen() {
     txLaunchParams,
     accounts,
     categories,
+    subcategories,
     settings,
     extendedSettings,
     addTransaction,
@@ -37,9 +41,32 @@ export function AddTransactionScreen() {
   const isBn = settings.language === 'BANGLA';
   const editing = txLaunchParams.editingTx ?? null;
 
-  const [type, setType] = useState<TransactionType>(
-    editing?.type ?? txLaunchParams.initialType ?? 'EXPENSE'
-  );
+  const initialType: TransactionType =
+    editing?.type ?? txLaunchParams.initialType ?? 'EXPENSE';
+
+  const initialSub = editing?.subcategory ?? txLaunchParams.initialSubcategory ?? '';
+  const inferredInitialCategory = useMemo(() => {
+    if (editing?.category) return editing.category;
+    if (txLaunchParams.initialCategory) return txLaunchParams.initialCategory;
+    if (initialSub) {
+      const matchedPreset = QUICK_SUBCATEGORY_PRESETS.find(
+        (p) =>
+          p.name.toLowerCase() === initialSub.trim().toLowerCase() ||
+          p.nameBn === initialSub.trim()
+      );
+      if (matchedPreset) {
+        return initialType === 'INCOME' || initialType === 'BORROW'
+          ? matchedPreset.defaultIncomeCategory
+          : matchedPreset.defaultExpenseCategory;
+      }
+    }
+    if (initialType === 'INCOME' || initialType === 'BORROW') return 'Salary';
+    if (initialType === 'TRANSFER') return 'Wallet Transfer';
+    if (initialType === 'CC_PAYMENT') return 'Credit Card Payment';
+    return 'Personal';
+  }, [editing?.category, initialSub, initialType, txLaunchParams.initialCategory]);
+
+  const [type, setType] = useState<TransactionType>(initialType);
   const [expr, setExpr] = useState<string>(
     editing
       ? String(editing.amount)
@@ -50,12 +77,13 @@ export function AddTransactionScreen() {
   const [title, setTitle] = useState<string>(
     editing?.title ?? txLaunchParams.initialTitle ?? ''
   );
-  const [category, setCategory] = useState<string>(
-    editing?.category ?? txLaunchParams.initialCategory ?? 'Food & Drinks'
-  );
-  const [subcategory, setSubcategory] = useState<string>(editing?.subcategory ?? '');
+  const [category, setCategory] = useState<string>(inferredInitialCategory);
+  const [subcategory, setSubcategory] = useState<string>(initialSub);
 
-  const visibleAccounts = useMemo(() => accounts.filter((a) => !a.isHidden), [accounts]);
+  const visibleAccounts = useMemo(
+    () => accounts.filter((a) => !a.isHidden).sort((a, b) => a.sortOrder - b.sortOrder),
+    [accounts]
+  );
   const defaultAccId =
     editing?.accountId ??
     txLaunchParams.preselectedAccountId ??
@@ -93,11 +121,16 @@ export function AddTransactionScreen() {
   );
 
   const evaluatedAmount = evaluateExpression(expr);
-  const fromAccount = accounts.find((a) => a.id === accountId);
-  const toAccount = accounts.find((a) => a.id === toAccountId);
   const selectedCatMeta = categories.find(
     (c) => c.name.toLowerCase() === category.toLowerCase()
   );
+
+  const activeCategorySubcategories = useMemo(() => {
+    if (!selectedCatMeta) return [];
+    return subcategories
+      .filter((s) => s.categoryId === selectedCatMeta.id)
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+  }, [selectedCatMeta, subcategories]);
 
   const handleTypeSwitch = (nextType: TransactionType) => {
     setType(nextType);
@@ -105,17 +138,28 @@ export function AddTransactionScreen() {
       const incCat = categories.find((c) => c.isIncome && !c.isTransfer);
       if (incCat) {
         setCategory(incCat.name);
-        setSubcategory('');
       }
     } else if (nextType === 'TRANSFER' || nextType === 'CC_PAYMENT') {
-      setCategory(nextType === 'CC_PAYMENT' ? 'Credit Card Payment' : 'Account Transfer');
-      setSubcategory('');
+      setCategory(nextType === 'CC_PAYMENT' ? 'Credit Card Payment' : 'Wallet Transfer');
+      if (!toAccountId || toAccountId === accountId) {
+        const alt = visibleAccounts.find((a) => a.id !== accountId);
+        if (alt) setToAccountId(alt.id);
+      }
     } else {
       const expCat = categories.find((c) => !c.isIncome && !c.isTransfer);
       if (expCat && (type === 'INCOME' || type === 'TRANSFER' || type === 'CC_PAYMENT')) {
         setCategory(expCat.name);
-        setSubcategory('');
       }
+    }
+  };
+
+  const handlePresetSubcategorySelect = (preset: (typeof QUICK_SUBCATEGORY_PRESETS)[number]) => {
+    const label = isBn ? preset.nameBn : preset.name;
+    setSubcategory(label);
+    if (type === 'INCOME' || type === 'BORROW') {
+      setCategory(preset.defaultIncomeCategory);
+    } else if (type === 'EXPENSE' || type === 'LEND') {
+      setCategory(preset.defaultExpenseCategory);
     }
   };
 
@@ -125,25 +169,26 @@ export function AddTransactionScreen() {
       return;
     }
     if (!accountId) {
-      showSnackbar(isBn ? 'অ্যাকাউন্ট নির্বাচন করুন' : 'Please select an account');
+      showSnackbar(isBn ? 'কার্ড বা অ্যাকাউন্ট নির্বাচন করুন' : 'Please select a card/account');
       return;
     }
     if ((type === 'TRANSFER' || type === 'CC_PAYMENT') && (!toAccountId || toAccountId === accountId)) {
-      showSnackbar(isBn ? 'গন্তব্য অ্যাকাউন্ট নির্বাচন করুন' : 'Please select a different destination account');
+      showSnackbar(isBn ? 'গন্তব্য কার্ড নির্বাচন করুন' : 'Please select a different destination card');
       return;
     }
 
     const parsedDate = new Date(dateTimeLocal).getTime();
     const timestamp = Number.isFinite(parsedDate) ? parsedDate : Date.now();
+    const cleanSub = subcategory.trim();
 
     if (editing) {
       updateTransaction({
         ...editing,
         type,
         amount: evaluatedAmount,
-        title: title.trim() || category,
+        title: title.trim() || cleanSub || category,
         category,
-        subcategory,
+        subcategory: cleanSub,
         accountId,
         toAccountId: type === 'TRANSFER' || type === 'CC_PAYMENT' ? toAccountId : null,
         timestamp,
@@ -156,9 +201,9 @@ export function AddTransactionScreen() {
       addTransaction({
         type,
         amount: evaluatedAmount,
-        title: title.trim() || category,
+        title: title.trim() || cleanSub || category,
         category,
-        subcategory,
+        subcategory: cleanSub,
         accountId,
         toAccountId: type === 'TRANSFER' || type === 'CC_PAYMENT' ? toAccountId : null,
         timestamp,
@@ -173,12 +218,12 @@ export function AddTransactionScreen() {
   };
 
   const txTypes: Array<{ id: TransactionType; label: string }> = [
-    { id: 'EXPENSE', label: t('expense', settings.language) },
-    { id: 'INCOME', label: t('income', settings.language) },
-    { id: 'TRANSFER', label: t('transfer', settings.language) },
-    { id: 'LEND', label: t('receivable', settings.language) },
-    { id: 'BORROW', label: t('payable', settings.language) },
-    { id: 'CC_PAYMENT', label: t('pay_bill', settings.language) },
+    { id: 'EXPENSE', label: isBn ? 'খরচ (আউট)' : 'Expense (Out)' },
+    { id: 'INCOME', label: isBn ? 'আয় (ইন)' : 'Income (In)' },
+    { id: 'TRANSFER', label: isBn ? 'কার্ড ট্রান্সফার' : 'Card Transfer' },
+    { id: 'LEND', label: isBn ? 'ধার দিয়েছি' : 'Lent' },
+    { id: 'BORROW', label: isBn ? 'ধার নিয়েছি' : 'Borrowed' },
+    { id: 'CC_PAYMENT', label: isBn ? 'কার্ড বিল' : 'Card Bill' },
   ];
 
   return (
@@ -232,20 +277,27 @@ export function AddTransactionScreen() {
       <div className="max-w-2xl mx-auto px-4 pt-4 space-y-4">
         {/* Type selector */}
         <div className="flex gap-1.5 overflow-x-auto pb-1">
-          {txTypes.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => handleTypeSwitch(item.id)}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap ${
-                type === item.id
-                  ? 'bg-sky-600 text-white'
-                  : 'glass-card text-slate-600 dark:text-slate-300'
-              }`}
-            >
-              {item.label}
-            </button>
-          ))}
+          {txTypes.map((item) => {
+            const active = type === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => handleTypeSwitch(item.id)}
+                className={`min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition ${
+                  active
+                    ? item.id === 'INCOME' || item.id === 'BORROW'
+                      ? 'bg-emerald-600 text-white'
+                      : item.id === 'EXPENSE' || item.id === 'LEND'
+                      ? 'bg-rose-600 text-white'
+                      : 'bg-sky-600 text-white'
+                    : 'glass-card text-slate-600 dark:text-slate-300'
+                }`}
+              >
+                {item.label}
+              </button>
+            );
+          })}
         </div>
 
         {/* Amount Hero Display */}
@@ -260,7 +312,15 @@ export function AddTransactionScreen() {
               className="text-xs font-bold text-sky-600 flex items-center gap-1"
             >
               <Calculator size={14} />
-              <span>{showKeypad ? (isBn ? 'কীপ্যাড লুকান' : 'Hide Keypad') : isBn ? 'ক্যালকুলেটর' : 'Keypad'}</span>
+              <span>
+                {showKeypad
+                  ? isBn
+                    ? 'কীপ্যাড লুকান'
+                    : 'Hide Keypad'
+                  : isBn
+                  ? 'ক্যালকুলেটর'
+                  : 'Keypad'}
+              </span>
             </button>
           </div>
           <div className="flex items-baseline gap-2">
@@ -293,47 +353,126 @@ export function AddTransactionScreen() {
           />
         )}
 
-        {/* Form Fields */}
-        <TranslucentCard className="p-4 space-y-3.5">
-          {/* From Wallet */}
-          <button
-            type="button"
-            onClick={() => setWalletPickerTarget('FROM')}
-            className="w-full p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200/70 dark:border-white/10 flex items-center justify-between text-left"
-          >
-            <div>
-              <span className="text-[11px] font-semibold text-slate-500 block">
-                {type === 'TRANSFER' || type === 'CC_PAYMENT'
-                  ? t('from_wallet', settings.language)
-                  : t('wallet_account', settings.language)}
-              </span>
-              <span className="text-sm font-bold text-slate-900 dark:text-white">
-                {fromAccount?.name || (isBn ? 'ওয়ালেট নির্বাচন করুন' : 'Select Wallet')}
-              </span>
-            </div>
-            <ChevronRight size={16} className="text-slate-400" />
-          </button>
-
-          {/* To Wallet if Transfer / CC Payment */}
-          {(type === 'TRANSFER' || type === 'CC_PAYMENT') && (
+        {/* Quick Card Selector */}
+        <TranslucentCard className="p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-extrabold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
+              <Wallet size={14} className="text-sky-600" />
+              {type === 'TRANSFER' || type === 'CC_PAYMENT'
+                ? isBn
+                  ? 'কোন কার্ড থেকে বের হবে'
+                  : 'From Card / Wallet'
+                : type === 'INCOME' || type === 'BORROW'
+                ? isBn
+                  ? 'কোন কার্ডে টাকা ঢুকবে'
+                  : 'Deposit Into Card'
+                : isBn
+                ? 'কোন কার্ড থেকে খরচ হবে'
+                : 'Pay From Card'}
+            </span>
             <button
               type="button"
-              onClick={() => setWalletPickerTarget('TO')}
-              className="w-full p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200/70 dark:border-white/10 flex items-center justify-between text-left"
+              onClick={() => setWalletPickerTarget('FROM')}
+              className="text-[11px] font-bold text-sky-600 dark:text-sky-400"
             >
-              <div>
-                <span className="text-[11px] font-semibold text-slate-500 block">
-                  {t('to_wallet', settings.language)}
-                </span>
-                <span className="text-sm font-bold text-slate-900 dark:text-white">
-                  {toAccount?.name || (isBn ? 'গন্তব্য ওয়ালেট বেছে নিন' : 'Select Destination Wallet')}
-                </span>
-              </div>
-              <ChevronRight size={16} className="text-slate-400" />
+              {isBn ? 'সব কার্ড / নতুন' : 'All / Add Card'}
             </button>
-          )}
+          </div>
 
-          {/* Category */}
+          <div className="grid grid-cols-2 gap-2">
+            {visibleAccounts.slice(0, 6).map((acc) => {
+              const selected = accountId === acc.id;
+              return (
+                <button
+                  key={acc.id}
+                  type="button"
+                  onClick={() => {
+                    setAccountId(acc.id);
+                    if ((type === 'TRANSFER' || type === 'CC_PAYMENT') && toAccountId === acc.id) {
+                      const other = visibleAccounts.find((a) => a.id !== acc.id);
+                      setToAccountId(other?.id ?? '');
+                    }
+                  }}
+                  className={`min-h-[52px] p-2.5 rounded-2xl border text-left transition flex items-center justify-between gap-2 ${
+                    selected
+                      ? 'border-sky-600 bg-sky-500/10 dark:bg-sky-500/20 shadow-sm'
+                      : 'border-slate-200/80 dark:border-white/10 bg-slate-50/70 dark:bg-slate-800/60'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className="w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: acc.colorHex }}
+                      />
+                      <span className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
+                        {acc.name}
+                      </span>
+                    </div>
+                    <span className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400 block mt-0.5 truncate">
+                      {formatCurrency(acc.balance, settings.currencySymbol, settings.language)}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Destination Card for Transfer / CC Payment */}
+          {(type === 'TRANSFER' || type === 'CC_PAYMENT') && (
+            <div className="pt-2 border-t border-slate-200/60 dark:border-white/10 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-extrabold text-slate-800 dark:text-slate-100">
+                  {isBn ? 'কোন কার্ডে টাকা ঢুকবে' : 'Destination Card'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setWalletPickerTarget('TO')}
+                  className="text-[11px] font-bold text-sky-600 dark:text-sky-400"
+                >
+                  {isBn ? 'সব কার্ড' : 'More'}
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {visibleAccounts
+                  .filter((a) => a.id !== accountId)
+                  .slice(0, 6)
+                  .map((acc) => {
+                    const selected = toAccountId === acc.id;
+                    return (
+                      <button
+                        key={acc.id}
+                        type="button"
+                        onClick={() => setToAccountId(acc.id)}
+                        className={`min-h-[50px] p-2.5 rounded-2xl border text-left transition ${
+                          selected
+                            ? 'border-emerald-600 bg-emerald-500/10 dark:bg-emerald-500/20 shadow-sm'
+                            : 'border-slate-200/80 dark:border-white/10 bg-slate-50/70 dark:bg-slate-800/60'
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className="w-2.5 h-2.5 rounded-full shrink-0"
+                            style={{ backgroundColor: acc.colorHex }}
+                          />
+                          <span className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
+                            {acc.name}
+                          </span>
+                        </div>
+                        <span className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400 block mt-0.5 truncate">
+                          {formatCurrency(acc.balance, settings.currencySymbol, settings.language)}
+                        </span>
+                      </button>
+                    );
+                  })}
+              </div>
+            </div>
+          )}
+        </TranslucentCard>
+
+        {/* Category & Subcategory Quick Picker + Details */}
+        <TranslucentCard className="p-4 space-y-3.5">
+          {/* Category Sheet Trigger */}
           <button
             type="button"
             onClick={() => setShowCategorySheet(true)}
@@ -350,6 +489,82 @@ export function AddTransactionScreen() {
             </div>
             <ChevronRight size={16} className="text-slate-400" />
           </button>
+
+          {/* Inline Subcategory / Khath Quick Picker */}
+          <div className="space-y-2">
+            <label className="text-xs font-extrabold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
+              <Tag size={13} className="text-sky-600" />
+              <span>
+                {isBn
+                  ? 'সাব-ক্যাটাগরি / খাত (যেমন: পার্সোনাল, ফ্যামিলি, বিজনেস)'
+                  : 'Subcategory (e.g. Personal, Family, Business)'}
+              </span>
+            </label>
+
+            <div className="flex flex-wrap gap-1.5">
+              {QUICK_SUBCATEGORY_PRESETS.map((preset) => {
+                const label = isBn ? preset.nameBn : preset.name;
+                const active =
+                  subcategory.trim().toLowerCase() === preset.name.toLowerCase() ||
+                  subcategory.trim() === preset.nameBn;
+                return (
+                  <button
+                    key={preset.name}
+                    type="button"
+                    onClick={() => handlePresetSubcategorySelect(preset)}
+                    className={`min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-bold transition ${
+                      active
+                        ? 'bg-sky-600 text-white shadow-sm'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+
+              {activeCategorySubcategories
+                .filter(
+                  (sub) =>
+                    !QUICK_SUBCATEGORY_PRESETS.some(
+                      (p) => p.name.toLowerCase() === sub.name.toLowerCase()
+                    )
+                )
+                .map((sub) => {
+                  const label = isBn && sub.nameBn ? sub.nameBn : sub.name;
+                  const active =
+                    subcategory.trim().toLowerCase() === sub.name.toLowerCase() ||
+                    subcategory.trim() === sub.nameBn;
+                  return (
+                    <button
+                      key={sub.id}
+                      type="button"
+                      onClick={() => setSubcategory(label)}
+                      className={`min-h-[34px] px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
+                        active
+                          ? 'bg-sky-600 text-white shadow-sm'
+                          : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+            </div>
+
+            <input
+              type="text"
+              value={subcategory}
+              maxLength={100}
+              onChange={(e) => setSubcategory(e.target.value)}
+              placeholder={
+                isBn
+                  ? 'অথবা নিজের মতো লিখুন (যেমন: দোকান ভাড়া, মায়ের ওষুধ)...'
+                  : 'Or type custom subcategory...'
+              }
+              className="w-full rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-slate-800 px-3.5 py-2 text-xs font-semibold text-slate-900 dark:text-white outline-none"
+            />
+          </div>
 
           <div>
             <label className="text-xs font-semibold text-slate-500 block mb-1">
@@ -441,7 +656,7 @@ export function AddTransactionScreen() {
         selectedSubcategoryName={subcategory}
         onSelect={(catName, subName) => {
           setCategory(catName);
-          setSubcategory(subName);
+          if (subName) setSubcategory(subName);
         }}
         onClose={() => setShowCategorySheet(false)}
         onCreateCategory={() => {

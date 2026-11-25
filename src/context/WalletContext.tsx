@@ -14,12 +14,17 @@ import type {
   PrimaryTab,
   SavingsGoalEntity,
   SmartNotification,
+  SpendingWayItem,
   SubcategoryEntity,
   SubScreen,
   TransactionEntity,
   TransactionType,
 } from '../types/models';
-import { getDefaultCategories } from '../data/initialData';
+import {
+  getDefaultCategories,
+  getDefaultFourCoreAccounts,
+  getDefaultSpendingWays,
+} from '../data/initialData';
 import { getThemeColors } from '../data/categoryCatalog';
 import { applyBalanceEffect } from '../utils/analytics';
 import {
@@ -42,9 +47,14 @@ import {
   fetchLatestCloudBackup,
   observeCloudAccounts,
   observeCloudTransactions,
+  registerWithEmailPassword,
+  reloadCurrentUser,
+  resendVerificationEmail,
   saveCloudAccount,
   saveCloudBackup,
   saveCloudTransaction,
+  sendPasswordReset,
+  signInWithEmailPassword,
   signInWithGooglePopup,
   signOutGoogle,
   subscribeAuthState,
@@ -65,6 +75,7 @@ export interface AddTransactionParams {
   preselectedAccountId?: string;
   preselectedToAccountId?: string;
   initialCategory?: string;
+  initialSubcategory?: string;
   initialAmount?: number;
   initialTitle?: string;
   initialMode?: 'default' | 'voice' | 'receipt';
@@ -91,7 +102,7 @@ const DEFAULT_SECTION_ORDER: HomeSectionKey[] = [
 ];
 
 export const DEFAULT_HOME_CUSTOMIZATION: HomeCustomization = {
-  cardStyle: 'STACK',
+  cardStyle: 'GRID',
   balanceCardStyle: 'STANDARD',
   sectionOrder: DEFAULT_SECTION_ORDER,
   visibleSections: ['budget', 'bills', 'recent_activity'],
@@ -103,7 +114,7 @@ const DEFAULT_SETTINGS: AppSettingsEntity = {
   country: 'Bangladesh',
   currencyCode: 'BDT',
   currencySymbol: '৳',
-  language: 'ENGLISH',
+  language: 'BANGLA',
   themeMode: 'AUTO',
   themeColor: 'SKY_CYAN',
   backgroundTexture: 'AURORA',
@@ -128,10 +139,12 @@ const DEFAULT_EXTENDED_SETTINGS: ExtendedSettingsState = {
   screenLockPin: '',
   customBanks: [],
   customMfsProviders: [],
+  spendingWays: getDefaultSpendingWays('BANGLA'),
 };
 
 interface PersistedState {
   guestMode: boolean;
+  coreInitialized?: boolean;
   settings: AppSettingsEntity;
   extendedSettings: ExtendedSettingsState;
   homeCustomization: HomeCustomization;
@@ -145,19 +158,62 @@ interface PersistedState {
   savingsGoals: SavingsGoalEntity[];
 }
 
+function mergeBuiltInCategories(
+  existingCats: CategoryEntity[],
+  existingSubs: SubcategoryEntity[]
+): { categories: CategoryEntity[]; subcategories: SubcategoryEntity[] } {
+  const defaults = getDefaultCategories();
+  const catIds = new Set(existingCats.map((c) => c.id));
+  const mergedCats = [...existingCats];
+  for (const d of defaults.categories) {
+    if (!catIds.has(d.id)) mergedCats.push(d);
+  }
+  const subIds = new Set(existingSubs.map((s) => s.id));
+  const mergedSubs = [...existingSubs];
+  for (const s of defaults.subcategories) {
+    if (!subIds.has(s.id)) mergedSubs.push(s);
+  }
+  return { categories: mergedCats, subcategories: mergedSubs };
+}
+
 function loadInitialPersistedState(): PersistedState {
   const defaults = getDefaultCategories();
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<PersistedState>;
+      const mergedSettings = { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) };
+      const existingAccs = Array.isArray(parsed.accounts) ? parsed.accounts : [];
+      const shouldSeedCore = !parsed.coreInitialized && existingAccs.length === 0;
+      const seededAccs = shouldSeedCore
+        ? getDefaultFourCoreAccounts(mergedSettings.language)
+        : existingAccs;
+      const mergedTaxonomy =
+        Array.isArray(parsed.categories) && parsed.categories.length > 0
+          ? mergeBuiltInCategories(
+              parsed.categories,
+              Array.isArray(parsed.subcategories) ? parsed.subcategories : []
+            )
+          : defaults;
+
+      const rawExtended: Partial<ExtendedSettingsState> = parsed.extendedSettings ?? {};
+      const resolvedWays =
+        Array.isArray(rawExtended.spendingWays) && rawExtended.spendingWays.length > 0
+          ? rawExtended.spendingWays
+          : getDefaultSpendingWays(mergedSettings.language);
       return {
         guestMode: Boolean(parsed.guestMode ?? false),
-        settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
-        extendedSettings: { ...DEFAULT_EXTENDED_SETTINGS, ...(parsed.extendedSettings ?? {}) },
+        coreInitialized: true,
+        settings: mergedSettings,
+        extendedSettings: {
+          ...DEFAULT_EXTENDED_SETTINGS,
+          ...rawExtended,
+          spendingWays: resolvedWays,
+        },
         homeCustomization: {
           ...DEFAULT_HOME_CUSTOMIZATION,
           ...(parsed.homeCustomization ?? {}),
+          cardStyle: parsed.homeCustomization?.cardStyle ?? DEFAULT_HOME_CUSTOMIZATION.cardStyle,
           sectionOrder:
             parsed.homeCustomization?.sectionOrder?.length
               ? parsed.homeCustomization.sectionOrder
@@ -166,16 +222,10 @@ function loadInitialPersistedState(): PersistedState {
             parsed.homeCustomization?.visibleSections ?? DEFAULT_HOME_CUSTOMIZATION.visibleSections,
         },
         accountSortOption: parsed.accountSortOption ?? 'CUSTOM',
-        accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
+        accounts: seededAccs,
         transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
-        categories:
-          Array.isArray(parsed.categories) && parsed.categories.length > 0
-            ? parsed.categories
-            : defaults.categories,
-        subcategories:
-          Array.isArray(parsed.subcategories) && parsed.subcategories.length > 0
-            ? parsed.subcategories
-            : defaults.subcategories,
+        categories: mergedTaxonomy.categories,
+        subcategories: mergedTaxonomy.subcategories,
         budgets: Array.isArray(parsed.budgets) ? parsed.budgets : [],
         debts: Array.isArray(parsed.debts) ? parsed.debts : [],
         savingsGoals: Array.isArray(parsed.savingsGoals) ? parsed.savingsGoals : [],
@@ -186,11 +236,12 @@ function loadInitialPersistedState(): PersistedState {
   }
   return {
     guestMode: false,
+    coreInitialized: true,
     settings: DEFAULT_SETTINGS,
     extendedSettings: DEFAULT_EXTENDED_SETTINGS,
     homeCustomization: DEFAULT_HOME_CUSTOMIZATION,
     accountSortOption: 'CUSTOM',
-    accounts: [],
+    accounts: getDefaultFourCoreAccounts(DEFAULT_SETTINGS.language),
     transactions: [],
     categories: defaults.categories,
     subcategories: defaults.subcategories,
@@ -208,6 +259,11 @@ interface WalletContextValue {
   unlockApp: (pin: string) => boolean;
   enterGuestMode: () => void;
   signInWithGoogle: () => Promise<void>;
+  signInWithEmail: (email: string, password: string) => Promise<void>;
+  signUpWithEmail: (email: string, password: string) => Promise<void>;
+  sendVerificationEmail: () => Promise<void>;
+  sendResetPasswordEmail: (email: string) => Promise<void>;
+  refreshAuthSession: () => Promise<boolean>;
   signOutUser: () => Promise<void>;
 
   settings: AppSettingsEntity;
@@ -254,6 +310,7 @@ interface WalletContextValue {
   toggleArchiveAccount: (accountId: string) => void;
   adjustAccountBalance: (accountId: string, newBalance: number, createAdjustmentTx?: boolean) => void;
   reorderAccounts: (orderedIds: string[]) => void;
+  restoreCoreCards: () => number;
 
   addTransaction: (tx: Omit<TransactionEntity, 'id'> & { id?: string }) => TransactionEntity;
   updateTransaction: (updated: TransactionEntity) => void;
@@ -266,6 +323,10 @@ interface WalletContextValue {
   restoreDefaultCategories: () => void;
   addSubcategory: (categoryId: string, name: string, nameBn?: string) => void;
   deleteSubcategory: (subId: string) => void;
+  spendingWays: SpendingWayItem[];
+  addSpendingWay: (name: string) => SpendingWayItem | null;
+  updateSpendingWay: (id: string, name: string) => void;
+  deleteSpendingWay: (id: string) => void;
 
   saveBudget: (budget: Omit<BudgetEntity, 'id'> & { id?: string }) => void;
   deleteBudget: (budgetId: string) => void;
@@ -312,6 +373,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const initial = useMemo(() => loadInitialPersistedState(), []);
 
   const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authVersion, setAuthVersion] = useState(0);
   const [authReady, setAuthReady] = useState(false);
   const [guestMode, setGuestMode] = useState<boolean>(initial.guestMode);
   const [isLocked, setIsLocked] = useState<boolean>(
@@ -380,6 +442,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     try {
       const state: PersistedState = {
         guestMode,
+        coreInitialized: true,
         settings,
         extendedSettings,
         homeCustomization,
@@ -428,9 +491,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     return unsub;
   }, []);
 
-  // Firestore real-time listeners when authenticated
+  // Firestore real-time listeners when authenticated and verified
   useEffect(() => {
-    if (!authUser) return;
+    if (!authUser || !authUser.emailVerified) return;
     const unsubAcc = observeCloudAccounts(authUser.uid, (cloudAccs) => {
       if (cloudAccs.length > 0) {
         setAccounts((localAccs) => {
@@ -453,7 +516,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       unsubAcc();
       unsubTx();
     };
-  }, [authUser]);
+  }, [authUser, authVersion]);
 
   const showSnackbar = useCallback(
     (message: string, actionLabel?: string, onAction?: () => void) => {
@@ -475,13 +538,55 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const signInWithGoogle = useCallback(async () => {
     const user = await signInWithGooglePopup();
     setGuestMode(false);
-    if (user) {
+    if (user && user.emailVerified) {
       try {
         await syncLocalDataToCloud(user.uid, accountsRef.current, transactionsRef.current);
       } catch {
         // non-fatal initial sync
       }
     }
+  }, []);
+
+  const signInWithEmail = useCallback(async (email: string, password: string) => {
+    const user = await signInWithEmailPassword(email, password);
+    setGuestMode(false);
+    setAuthVersion((v) => v + 1);
+    if (user && user.emailVerified) {
+      try {
+        await syncLocalDataToCloud(user.uid, accountsRef.current, transactionsRef.current);
+      } catch {
+        // non-fatal initial sync
+      }
+    }
+  }, []);
+
+  const signUpWithEmail = useCallback(async (email: string, password: string) => {
+    await registerWithEmailPassword(email, password);
+    setGuestMode(false);
+    setAuthVersion((v) => v + 1);
+  }, []);
+
+  const sendVerificationEmail = useCallback(async () => {
+    await resendVerificationEmail();
+  }, []);
+
+  const sendResetPasswordEmail = useCallback(async (email: string) => {
+    await sendPasswordReset(email);
+  }, []);
+
+  const refreshAuthSession = useCallback(async (): Promise<boolean> => {
+    const updated = await reloadCurrentUser();
+    setAuthUser(updated);
+    setAuthVersion((v) => v + 1);
+    if (updated && updated.emailVerified) {
+      try {
+        await syncLocalDataToCloud(updated.uid, accountsRef.current, transactionsRef.current);
+      } catch {
+        // non-fatal initial sync
+      }
+      return true;
+    }
+    return false;
   }, []);
 
   const signOutUser = useCallback(async () => {
@@ -554,7 +659,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         sortOrder: accountsRef.current.length,
       };
       setAccounts((prev) => [...prev, next]);
-      if (authUser) {
+      if (authUser?.emailVerified) {
         void saveCloudAccount(authUser.uid, next).catch(() => undefined);
       }
       return next;
@@ -565,7 +670,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const updateAccount = useCallback(
     (account: AccountEntity) => {
       setAccounts((prev) => prev.map((a) => (a.id === account.id ? account : a)));
-      if (authUser) {
+      if (authUser?.emailVerified) {
         void saveCloudAccount(authUser.uid, account).catch(() => undefined);
       }
     },
@@ -578,7 +683,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       setTransactions((prev) =>
         prev.filter((t) => t.accountId !== accountId && t.toAccountId !== accountId)
       );
-      if (authUser) {
+      if (authUser?.emailVerified) {
         void deleteCloudAccount(authUser.uid, accountId).catch(() => undefined);
       }
     },
@@ -591,7 +696,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         prev.map((a) => {
           if (a.id !== accountId) return a;
           const updated = { ...a, isHidden: !a.isHidden };
-          if (authUser) void saveCloudAccount(authUser.uid, updated).catch(() => undefined);
+          if (authUser?.emailVerified) void saveCloudAccount(authUser.uid, updated).catch(() => undefined);
           return updated;
         })
       );
@@ -606,7 +711,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       const diff = newBalance - target.balance;
       const updated = { ...target, balance: newBalance };
       setAccounts((prev) => prev.map((a) => (a.id === accountId ? updated : a)));
-      if (authUser) void saveCloudAccount(authUser.uid, updated).catch(() => undefined);
+      if (authUser?.emailVerified) void saveCloudAccount(authUser.uid, updated).catch(() => undefined);
 
       if (createAdjustmentTx && Math.abs(diff) > 0.009) {
         const tx: TransactionEntity = {
@@ -625,7 +730,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
           debtId: null,
         };
         setTransactions((prev) => [tx, ...prev]);
-        if (authUser) void saveCloudTransaction(authUser.uid, tx).catch(() => undefined);
+        if (authUser?.emailVerified) void saveCloudTransaction(authUser.uid, tx).catch(() => undefined);
       }
     },
     [authUser]
@@ -647,6 +752,25 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  const restoreCoreCards = useCallback((): number => {
+    const defaults = getDefaultFourCoreAccounts(settings.language);
+    let added = 0;
+    const existing = accountsRef.current;
+    const existingIds = new Set(existing.map((a) => a.id));
+    const missing = defaults.filter((d) => !existingIds.has(d.id));
+    if (missing.length > 0) {
+      added = missing.length;
+      const next = [...existing, ...missing].sort((a, b) => a.sortOrder - b.sortOrder);
+      setAccounts(next);
+      if (authUser?.emailVerified) {
+        for (const acc of missing) {
+          void saveCloudAccount(authUser.uid, acc).catch(() => undefined);
+        }
+      }
+    }
+    return added;
+  }, [authUser, settings.language]);
+
   // Transactions
   const addTransaction = useCallback(
     (input: Omit<TransactionEntity, 'id'> & { id?: string }): TransactionEntity => {
@@ -658,7 +782,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       const nextAccs = applyBalanceEffect(accountsRef.current, tx, false);
       setAccounts(nextAccs);
 
-      if (authUser) {
+      if (authUser?.emailVerified) {
         void saveCloudTransaction(authUser.uid, tx).catch(() => undefined);
         for (const acc of nextAccs) {
           if (acc.id === tx.accountId || acc.id === tx.toAccountId) {
@@ -681,7 +805,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       setTransactions((prev) =>
         prev.map((t) => (t.id === updated.id ? updated : t)).sort((a, b) => b.timestamp - a.timestamp)
       );
-      if (authUser) {
+      if (authUser?.emailVerified) {
         void saveCloudTransaction(authUser.uid, updated).catch(() => undefined);
         for (const acc of nextAccs) {
           if (
@@ -706,7 +830,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       setAccounts(nextAccs);
       setTransactions((prev) => prev.filter((t) => t.id !== txId));
 
-      if (authUser) {
+      if (authUser?.emailVerified) {
         void deleteCloudTransaction(authUser.uid, txId).catch(() => undefined);
         for (const acc of nextAccs) {
           if (acc.id === target.accountId || acc.id === target.toAccountId) {
@@ -723,7 +847,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
           setTransactions((prev) => [target, ...prev].sort((a, b) => b.timestamp - a.timestamp));
           const restoredAccs = applyBalanceEffect(accountsRef.current, target, false);
           setAccounts(restoredAccs);
-          if (authUser) {
+          if (authUser?.emailVerified) {
             void saveCloudTransaction(authUser.uid, target).catch(() => undefined);
           }
         }
@@ -805,6 +929,57 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const deleteSubcategory = useCallback((subId: string) => {
     setSubcategories((prev) => prev.filter((s) => s.id !== subId));
   }, []);
+
+  const spendingWays = useMemo(
+    () =>
+      extendedSettings.spendingWays && extendedSettings.spendingWays.length > 0
+        ? extendedSettings.spendingWays
+        : getDefaultSpendingWays(settings.language),
+    [extendedSettings.spendingWays, settings.language]
+  );
+
+  const addSpendingWay = useCallback(
+    (name: string): SpendingWayItem | null => {
+      const clean = name.trim().slice(0, 100);
+      if (!clean) return null;
+      const exists = spendingWays.some((w) => w.name.toLowerCase() === clean.toLowerCase());
+      if (exists) return null;
+      const item: SpendingWayItem = {
+        id: `way_${crypto.randomUUID().slice(0, 8)}`,
+        name: clean,
+      };
+      setExtendedSettings((prev) => ({
+        ...prev,
+        spendingWays: [...(prev.spendingWays ?? spendingWays), item],
+      }));
+      return item;
+    },
+    [spendingWays]
+  );
+
+  const updateSpendingWay = useCallback(
+    (id: string, name: string) => {
+      const clean = name.trim().slice(0, 100);
+      if (!clean) return;
+      setExtendedSettings((prev) => ({
+        ...prev,
+        spendingWays: (prev.spendingWays ?? spendingWays).map((w) =>
+          w.id === id ? { ...w, name: clean } : w
+        ),
+      }));
+    },
+    [spendingWays]
+  );
+
+  const deleteSpendingWay = useCallback(
+    (id: string) => {
+      setExtendedSettings((prev) => ({
+        ...prev,
+        spendingWays: (prev.spendingWays ?? spendingWays).filter((w) => w.id !== id),
+      }));
+    },
+    [spendingWays]
+  );
 
   // Budgets
   const saveBudget = useCallback((input: Omit<BudgetEntity, 'id'> & { id?: string }) => {
@@ -1131,8 +1306,12 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   );
 
   const uploadCloudBackup = useCallback(async () => {
-    if (!authUser) throw new Error('Please sign in with Google to upload a cloud backup.');
+    if (!authUser) throw new Error('Please sign in first to upload a cloud backup.');
+    if (!authUser.emailVerified) {
+      throw new Error('Please verify your email address first before backing up to Firebase.');
+    }
     const json = exportJsonBackup();
+    await syncLocalDataToCloud(authUser.uid, accounts, transactions);
     await saveCloudBackup(authUser.uid, json, {
       accountsCount: accounts.length,
       transactionsCount: transactions.length,
@@ -1140,15 +1319,21 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       debtsCount: debts.length,
     });
     updateExtendedSettings({ lastAutoBackupMillis: Date.now() });
-  }, [accounts.length, authUser, categories.length, debts.length, exportJsonBackup, transactions.length, updateExtendedSettings]);
+  }, [accounts, authUser, categories.length, debts.length, exportJsonBackup, transactions, updateExtendedSettings]);
 
   const fetchCloudBackupPreview = useCallback(async () => {
-    if (!authUser) throw new Error('Please sign in with Google to access Cloud Backups.');
+    if (!authUser) throw new Error('Please sign in first to access Cloud Backups.');
+    if (!authUser.emailVerified) {
+      throw new Error('Please verify your email address first before accessing Cloud Backups.');
+    }
     return fetchLatestCloudBackup(authUser.uid);
   }, [authUser]);
 
   const syncCloudNow = useCallback(async () => {
-    if (!authUser) throw new Error('Sign in with Google first.');
+    if (!authUser) throw new Error('Sign in first.');
+    if (!authUser.emailVerified) {
+      throw new Error('Please verify your email address first.');
+    }
     await syncLocalDataToCloud(authUser.uid, accounts, transactions);
   }, [accounts, authUser, transactions]);
 
@@ -1201,6 +1386,11 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     unlockApp,
     enterGuestMode,
     signInWithGoogle,
+    signInWithEmail,
+    signUpWithEmail,
+    sendVerificationEmail,
+    sendResetPasswordEmail,
+    refreshAuthSession,
     signOutUser,
 
     settings,
@@ -1247,6 +1437,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     toggleArchiveAccount,
     adjustAccountBalance,
     reorderAccounts,
+    restoreCoreCards,
 
     addTransaction,
     updateTransaction,
@@ -1259,6 +1450,10 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     restoreDefaultCategories,
     addSubcategory,
     deleteSubcategory,
+    spendingWays,
+    addSpendingWay,
+    updateSpendingWay,
+    deleteSpendingWay,
 
     saveBudget,
     deleteBudget,
