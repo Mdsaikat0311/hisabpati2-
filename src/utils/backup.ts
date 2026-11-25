@@ -1,11 +1,14 @@
 import type {
   AccountEntity,
+  AccountSortOption,
   AccountType,
   AppSettingsEntity,
   BudgetEntity,
   CategoryEntity,
   DebtEntity,
   DebtType,
+  ExtendedSettingsState,
+  HomeCustomization,
   SavingsGoalEntity,
   SubcategoryEntity,
   TransactionEntity,
@@ -39,6 +42,9 @@ export interface NormalizedBackupPayload {
   formatType: BackupFormatType;
   backupDate: string;
   settings: Partial<AppSettingsEntity> | null;
+  extendedSettings?: Partial<ExtendedSettingsState> | null;
+  homeCustomization?: Partial<HomeCustomization> | null;
+  accountSortOption?: AccountSortOption | null;
   accounts: AccountEntity[];
   accountsHaveExplicitBalance: Set<string>;
   categories: CategoryEntity[];
@@ -51,20 +57,44 @@ export interface NormalizedBackupPayload {
   migratedRecordsCount: number;
 }
 
-export function createBackupJson(data: {
-  settings: AppSettingsEntity;
-  accounts: AccountEntity[];
-  categories: CategoryEntity[];
-  subcategories: SubcategoryEntity[];
-  transactions: TransactionEntity[];
-  budgets: BudgetEntity[];
-  debts: DebtEntity[];
-  savingsGoals: SavingsGoalEntity[];
-}): string {
+export function createBackupJson(
+  data: {
+    settings: AppSettingsEntity;
+    extendedSettings?: Partial<ExtendedSettingsState>;
+    homeCustomization?: HomeCustomization;
+    accountSortOption?: AccountSortOption;
+    accounts: AccountEntity[];
+    categories: CategoryEntity[];
+    subcategories: SubcategoryEntity[];
+    transactions: TransactionEntity[];
+    budgets: BudgetEntity[];
+    debts: DebtEntity[];
+    savingsGoals: SavingsGoalEntity[];
+  },
+  options?: { compact?: boolean; includeTimestamp?: boolean }
+): string {
+  const safeExtended = data.extendedSettings
+    ? {
+        profileAvatarId: data.extendedSettings.profileAvatarId,
+        profileAvatarBgHex: data.extendedSettings.profileAvatarBgHex,
+        profileCustomName: data.extendedSettings.profileCustomName,
+        defaultWalletId: data.extendedSettings.defaultWalletId,
+        autoOpenAmountKeypad: data.extendedSettings.autoOpenAmountKeypad,
+        budgetAlertEnabled: data.extendedSettings.budgetAlertEnabled,
+        debtAlertEnabled: data.extendedSettings.debtAlertEnabled,
+        billReminderEnabled: data.extendedSettings.billReminderEnabled,
+        creditCardDueEnabled: data.extendedSettings.creditCardDueEnabled,
+        weeklySummaryEnabled: data.extendedSettings.weeklySummaryEnabled,
+        customBanks: data.extendedSettings.customBanks,
+        customMfsProviders: data.extendedSettings.customMfsProviders,
+        spendingWays: data.extendedSettings.spendingWays,
+      }
+    : undefined;
+
   const payload = {
     appName: 'Hishab Pati',
-    schemaVersion: 1,
-    backupDate: new Date().toISOString(),
+    schemaVersion: 2,
+    ...(options?.includeTimestamp === false ? {} : { backupDate: new Date().toISOString() }),
     currency: data.settings.currencyCode || 'BDT',
     settings: {
       userName: data.settings.userName,
@@ -79,6 +109,9 @@ export function createBackupJson(data: {
       screenshotProtectionEnabled: data.settings.screenshotProtectionEnabled,
       notificationsEnabled: data.settings.notificationsEnabled,
     },
+    ...(safeExtended ? { extendedSettings: safeExtended } : {}),
+    ...(data.homeCustomization ? { homeCustomization: data.homeCustomization } : {}),
+    ...(data.accountSortOption ? { accountSortOption: data.accountSortOption } : {}),
     accounts: data.accounts,
     categories: data.categories,
     subcategories: data.subcategories,
@@ -87,7 +120,7 @@ export function createBackupJson(data: {
     debts: data.debts,
     savingsGoals: data.savingsGoals,
   };
-  return JSON.stringify(payload, null, 2);
+  return options?.compact ? JSON.stringify(payload) : JSON.stringify(payload, null, 2);
 }
 
 function escapeCsv(val: string): string {
@@ -639,6 +672,9 @@ export function parseAndMigrateBackup(rawInput: string): NormalizedBackupPayload
     formatType: isExpend ? 'EXPEND_LEGACY' : 'MY_WALLET_CURRENT',
     backupDate: String(root.backupDate ?? new Date().toISOString()),
     settings: (root.settings as Partial<AppSettingsEntity>) ?? null,
+    extendedSettings: (root.extendedSettings as Partial<ExtendedSettingsState>) ?? null,
+    homeCustomization: (root.homeCustomization as Partial<HomeCustomization>) ?? null,
+    accountSortOption: (root.accountSortOption as AccountSortOption) ?? null,
     accounts,
     accountsHaveExplicitBalance: explicitBalanceIds,
     categories,

@@ -1,4 +1,5 @@
 import { initializeApp } from 'firebase/app';
+import { getAnalytics, isSupported, type Analytics } from 'firebase/analytics';
 import {
   getAuth,
   GoogleAuthProvider,
@@ -27,9 +28,26 @@ import {
 import firebaseConfig from '../firebase-applet-config.json';
 import type { AccountEntity, CloudBackupInfo, TransactionEntity } from './types/models';
 
-export const app = initializeApp(firebaseConfig);
+const resolvedFirebaseConfig = {
+  ...firebaseConfig,
+  measurementId: firebaseConfig.measurementId || 'G-CSFYYVSRHK',
+};
+
+export const app = initializeApp(resolvedFirebaseConfig);
 export const auth = getAuth(app);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const db = getFirestore(app, resolvedFirebaseConfig.firestoreDatabaseId);
+export let analytics: Analytics | null = null;
+if (typeof window !== 'undefined' && resolvedFirebaseConfig.measurementId) {
+  void isSupported()
+    .then((supported) => {
+      if (supported) {
+        analytics = getAnalytics(app);
+      }
+    })
+    .catch(() => {
+      analytics = null;
+    });
+}
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
@@ -329,6 +347,64 @@ export async function syncLocalDataToCloud(
   }
 }
 
+export async function fetchCloudAccounts(uid: string): Promise<AccountEntity[]> {
+  const path = `users/${uid}/accounts`;
+  try {
+    const snap = await getDocs(collection(db, 'users', uid, 'accounts'));
+    return snap.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: d.id,
+        name: String(data.name ?? 'Account'),
+        type: (data.type as AccountEntity['type']) ?? 'CASH',
+        institution: String(data.institution ?? ''),
+        balance: Number(data.balance ?? 0),
+        openingBalance: Number(data.openingBalance ?? 0),
+        accountNumberLast4: String(data.accountNumberLast4 ?? ''),
+        colorHex: String(data.colorHex ?? '#4F46E5'),
+        iconName: String(data.iconName ?? 'account_balance'),
+        isHidden: Boolean(data.isHidden ?? false),
+        sortOrder: Number(data.sortOrder ?? 0),
+        creditLimit: Number(data.creditLimit ?? 0),
+        billingDate: String(data.billingDate ?? ''),
+        paymentDueDate: String(data.paymentDueDate ?? ''),
+        minPayment: Number(data.minPayment ?? 0),
+        notes: String(data.notes ?? ''),
+        includeInTotal: data.includeInTotal === undefined ? true : Boolean(data.includeInTotal),
+      };
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
+export async function fetchCloudTransactions(uid: string): Promise<TransactionEntity[]> {
+  const path = `users/${uid}/transactions`;
+  try {
+    const snap = await getDocs(collection(db, 'users', uid, 'transactions'));
+    return snap.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: d.id,
+        type: (data.type as TransactionEntity['type']) ?? 'EXPENSE',
+        amount: Number(data.amount ?? 0),
+        title: String(data.title ?? 'Transaction'),
+        category: String(data.category ?? 'Other Expenses'),
+        subcategory: String(data.subcategory ?? ''),
+        accountId: String(data.accountId ?? ''),
+        toAccountId: data.toAccountId ? String(data.toAccountId) : null,
+        timestamp: Number(data.timestamp ?? Date.now()),
+        notes: String(data.notes ?? ''),
+        isRecurring: Boolean(data.isRecurring ?? false),
+        payeeOrPayer: String(data.payeeOrPayer ?? ''),
+        debtId: data.debtId ? String(data.debtId) : null,
+      };
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
 export async function saveCloudBackup(
   uid: string,
   jsonString: string,
@@ -338,23 +414,25 @@ export async function saveCloudBackup(
     categoriesCount: number;
     debtsCount: number;
   }
-): Promise<void> {
+): Promise<number> {
   const docRef = doc(db, 'users', uid, 'backups', 'latest');
   const path = `users/${uid}/backups/latest`;
   try {
-    const fileSizeBytes = new TextEncoder().encode(jsonString).length;
+    const fileSizeBytes = Math.trunc(new TextEncoder().encode(jsonString).length);
+    const uploadedAtMillis = Math.trunc(Date.now());
     await setDoc(docRef, {
       userId: uid,
       backupJson: jsonString,
-      backupDate: new Date().toISOString(),
-      accountsCount: counts.accountsCount,
-      transactionsCount: counts.transactionsCount,
-      categoriesCount: counts.categoriesCount,
-      debtsCount: counts.debtsCount,
+      backupDate: new Date(uploadedAtMillis).toISOString(),
+      accountsCount: Math.trunc(counts.accountsCount),
+      transactionsCount: Math.trunc(counts.transactionsCount),
+      categoriesCount: Math.trunc(counts.categoriesCount),
+      debtsCount: Math.trunc(counts.debtsCount),
       fileSizeBytes,
       uploadedAt: serverTimestamp(),
-      uploadedAtMillis: Date.now(),
+      uploadedAtMillis,
     });
+    return uploadedAtMillis;
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }

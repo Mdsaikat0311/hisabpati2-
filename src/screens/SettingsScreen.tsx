@@ -1,8 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   Check,
-  CloudDownload,
-  CloudUpload,
+  CheckCircle2,
   CreditCard,
   Edit3,
   Eye,
@@ -31,6 +30,7 @@ import type { AccountEntity, AccountType, AppLanguage, ThemeMode } from '../type
 export function SettingsScreen() {
   const {
     authUser,
+    isCloudSyncing,
     accounts,
     spendingWays,
     settings,
@@ -41,6 +41,8 @@ export function SettingsScreen() {
     addSpendingWay,
     updateSpendingWay,
     deleteSpendingWay,
+    addSpendingSubWay,
+    deleteSpendingSubWay,
     updateSettings,
     signInWithGoogle,
     signInWithEmail,
@@ -49,10 +51,6 @@ export function SettingsScreen() {
     sendResetPasswordEmail,
     refreshAuthSession,
     signOutUser,
-    uploadCloudBackup,
-    fetchCloudBackupPreview,
-    parseBackupPreview,
-    applyRestoredBackup,
     showSnackbar,
   } = useWallet();
 
@@ -77,10 +75,12 @@ export function SettingsScreen() {
   const [editBalance, setEditBalance] = useState('');
   const [editColor, setEditColor] = useState('#0284C7');
 
-  // Add / edit spending way state
+  // Add / edit spending way & sub-way state
   const [newWayName, setNewWayName] = useState('');
   const [editingWayId, setEditingWayId] = useState<string | null>(null);
   const [editingWayText, setEditingWayText] = useState('');
+  const [activeSubWayEditorId, setActiveSubWayEditorId] = useState<string | null>(null);
+  const [newSubWayText, setNewSubWayText] = useState('');
 
   // Firebase Email/Password auth & cloud backup state
   const [showEmailForm, setShowEmailForm] = useState(false);
@@ -89,7 +89,6 @@ export function SettingsScreen() {
   const [authPassword, setAuthPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
-  const [backupBusy, setBackupBusy] = useState<'BACKUP' | 'RESTORE' | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
 
   const formatFirebaseAuthError = (err: unknown): string => {
@@ -166,44 +165,6 @@ export function SettingsScreen() {
       setAuthError(formatFirebaseAuthError(err));
     } finally {
       setAuthBusy(false);
-    }
-  };
-
-  const handleCloudBackupNow = async () => {
-    setBackupBusy('BACKUP');
-    try {
-      await uploadCloudBackup();
-      showSnackbar(
-        isBn ? 'আপনার সব হিসাব ফায়ারবেসে ব্যাকআপ রাখা হয়েছে!' : 'All data backed up to Firebase!'
-      );
-    } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : 'Backup failed');
-    } finally {
-      setBackupBusy(null);
-    }
-  };
-
-  const handleCloudRestoreNow = async () => {
-    setBackupBusy('RESTORE');
-    try {
-      const latest = await fetchCloudBackupPreview();
-      if (!latest) {
-        showSnackbar(
-          isBn ? 'ফায়ারবেসে কোনো পুরনো ব্যাকআপ পাওয়া যায়নি।' : 'No cloud backup found in Firebase.'
-        );
-        return;
-      }
-      const payload = parseBackupPreview(latest.jsonString);
-      await applyRestoredBackup(payload);
-      showSnackbar(
-        isBn
-          ? `ফায়ারবেস থেকে ${localizeDigits(payload.transactions.length, settings.language)}টি হিসাব রিস্টোর হয়েছে!`
-          : `Restored ${payload.transactions.length} transactions from Firebase!`
-      );
-    } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : 'Restore failed');
-    } finally {
-      setBackupBusy(null);
     }
   };
 
@@ -513,65 +474,159 @@ export function SettingsScreen() {
           <div className="divide-y divide-slate-200/60 dark:divide-white/10">
             {spendingWays.map((way, idx) => {
               const isEditing = editingWayId === way.id;
+              const subWays = way.subWays ?? [];
+              const isAddingSub = activeSubWayEditorId === way.id;
               return (
-                <div
-                  key={way.id}
-                  className="py-2.5 flex items-center justify-between gap-2 min-h-[48px]"
-                >
-                  {isEditing ? (
-                    <div className="flex-1 flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={editingWayText}
-                        maxLength={100}
-                        onChange={(e) => setEditingWayText(e.target.value)}
-                        className="flex-1 min-h-[38px] rounded-xl border border-sky-500 bg-slate-50 dark:bg-slate-800 px-3 py-1.5 text-sm font-semibold outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          updateSpendingWay(way.id, editingWayText);
-                          setEditingWayId(null);
-                        }}
-                        className="min-h-[38px] px-3 py-1.5 rounded-xl bg-sky-600 text-white text-xs font-bold"
-                      >
-                        {isBn ? 'সেভ' : 'Save'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditingWayId(null)}
-                        className="min-h-[38px] px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-bold"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <span className="text-sm font-bold text-slate-800 dark:text-slate-100 truncate">
-                        {localizeDigits(idx + 1, settings.language)}. {way.name}
-                      </span>
-                      <div className="flex items-center gap-1 shrink-0">
+                <div key={way.id} className="py-3 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 min-h-[40px]">
+                    {isEditing ? (
+                      <div className="flex-1 flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={editingWayText}
+                          maxLength={100}
+                          onChange={(e) => setEditingWayText(e.target.value)}
+                          className="flex-1 min-h-[38px] rounded-xl border border-sky-500 bg-slate-50 dark:bg-slate-800 px-3 py-1.5 text-sm font-semibold outline-none"
+                        />
                         <button
                           type="button"
                           onClick={() => {
-                            setEditingWayId(way.id);
-                            setEditingWayText(way.name);
+                            updateSpendingWay(way.id, editingWayText);
+                            setEditingWayId(null);
                           }}
-                          aria-label={isBn ? 'নাম পরিবর্তন' : 'Rename'}
-                          className="w-9 h-9 rounded-xl flex items-center justify-center text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                          className="min-h-[38px] px-3 py-1.5 rounded-xl bg-sky-600 text-white text-xs font-bold"
                         >
-                          <Edit3 size={14} />
+                          {isBn ? 'সেভ' : 'Save'}
                         </button>
                         <button
                           type="button"
-                          onClick={() => deleteSpendingWay(way.id)}
-                          aria-label={isBn ? 'মুছুন' : 'Delete'}
-                          className="w-9 h-9 rounded-xl flex items-center justify-center text-slate-400 hover:text-rose-600 hover:bg-rose-500/10"
+                          onClick={() => setEditingWayId(null)}
+                          className="min-h-[38px] px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-bold"
                         >
-                          <Trash2 size={14} />
+                          <X size={14} />
                         </button>
                       </div>
-                    </>
+                    ) : (
+                      <>
+                        <div className="min-w-0 flex items-center gap-2">
+                          <span className="text-sm font-bold text-slate-800 dark:text-slate-100 truncate">
+                            {localizeDigits(idx + 1, settings.language)}. {way.name}
+                          </span>
+                          {subWays.length > 0 && (
+                            <span className="text-[11px] font-bold px-2 py-0.5 rounded-lg bg-sky-500/10 text-sky-700 dark:text-sky-300 font-mono-num shrink-0">
+                              {localizeDigits(subWays.length, settings.language)}{' '}
+                              {isBn ? 'টি সাবখাত' : 'sub'}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActiveSubWayEditorId(isAddingSub ? null : way.id);
+                              setNewSubWayText('');
+                            }}
+                            className={`min-h-[34px] px-2.5 py-1 rounded-xl text-xs font-bold inline-flex items-center gap-1 transition ${
+                              isAddingSub
+                                ? 'bg-sky-600 text-white'
+                                : 'bg-sky-500/10 text-sky-700 dark:text-sky-300 hover:bg-sky-500/20'
+                            }`}
+                          >
+                            <Plus size={12} />
+                            <span>{isBn ? 'সাবখাত' : 'Sub'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingWayId(way.id);
+                              setEditingWayText(way.name);
+                            }}
+                            aria-label={isBn ? 'নাম পরিবর্তন' : 'Rename'}
+                            className="w-9 h-9 rounded-xl flex items-center justify-center text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                          >
+                            <Edit3 size={14} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deleteSpendingWay(way.id)}
+                            aria-label={isBn ? 'মুছুন' : 'Delete'}
+                            className="w-9 h-9 rounded-xl flex items-center justify-center text-slate-400 hover:text-rose-600 hover:bg-rose-500/10"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Sub-khaths list for this Khath */}
+                  {(subWays.length > 0 || isAddingSub) && (
+                    <div className="pl-3 sm:pl-4 space-y-2 border-l-2 border-sky-500/30">
+                      {subWays.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {subWays.map((sub) => (
+                            <span
+                              key={sub}
+                              className="inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200/80 dark:border-white/10 text-xs font-semibold text-slate-700 dark:text-slate-200"
+                            >
+                              <span>{sub}</span>
+                              <button
+                                type="button"
+                                onClick={() => deleteSpendingSubWay(way.id, sub)}
+                                aria-label={isBn ? `${sub} মুছুন` : `Remove ${sub}`}
+                                className="w-5 h-5 rounded-lg flex items-center justify-center text-slate-400 hover:text-rose-600 hover:bg-rose-500/10 transition"
+                              >
+                                <X size={12} />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {isAddingSub && (
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            const clean = newSubWayText.trim();
+                            if (!clean) return;
+                            const ok = addSpendingSubWay(way.id, clean);
+                            if (!ok) {
+                              showSnackbar(
+                                isBn ? 'এই সাবখাতটি আগে থেকেই আছে' : 'This sub-way already exists'
+                              );
+                              return;
+                            }
+                            setNewSubWayText('');
+                            showSnackbar(
+                              isBn
+                                ? `${way.name}-এ "${clean}" সাবখাত যোগ হয়েছে`
+                                : `Added "${clean}" under ${way.name}`
+                            );
+                          }}
+                          className="flex gap-1.5"
+                        >
+                          <input
+                            type="text"
+                            autoFocus
+                            value={newSubWayText}
+                            maxLength={80}
+                            onChange={(e) => setNewSubWayText(e.target.value)}
+                            placeholder={
+                              isBn
+                                ? `${way.name}-এর সাবখাত লিখুন (যেমন: বাজার, ভাড়া, বাবা-মা)...`
+                                : `Add sub-way for ${way.name}...`
+                            }
+                            className="flex-1 min-h-[38px] rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-slate-800 px-3 py-1.5 text-xs text-slate-900 dark:text-white outline-none"
+                          />
+                          <button
+                            type="submit"
+                            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold shrink-0"
+                          >
+                            {isBn ? 'যোগ' : 'Add'}
+                          </button>
+                        </form>
+                      )}
+                    </div>
                   )}
                 </div>
               );
@@ -892,49 +947,37 @@ export function SettingsScreen() {
             )}
 
             {authUser && authUser.emailVerified && (
-              <div className="rounded-2xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200/80 dark:border-white/10 p-3 space-y-2.5">
-                <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
-                  <span className="font-semibold text-emerald-600 dark:text-emerald-400">
-                    {isBn ? 'ফায়ারবেস ব্যাকআপ সংযুক্ত আছে' : 'Connected to Firebase Backup'}
+              <div className="rounded-2xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200/80 dark:border-white/10 p-3 space-y-1">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="inline-flex items-center gap-1.5 font-bold text-emerald-600 dark:text-emerald-400">
+                    {isCloudSyncing ? (
+                      <Loader2 size={14} className="animate-spin text-sky-600 dark:text-sky-400" />
+                    ) : (
+                      <CheckCircle2 size={14} />
+                    )}
+                    <span>
+                      {isCloudSyncing
+                        ? isBn
+                          ? 'ফায়ারবেসে অটো-ব্যাকআপ হচ্ছে...'
+                          : 'Auto-backing up to Firebase...'
+                        : isBn
+                        ? 'অটো-ব্যাকআপ সবসময় চালু আছে'
+                        : 'Always-on Auto-Backup Active'}
+                    </span>
                   </span>
                   {extendedSettings.lastAutoBackupMillis > 0 && (
-                    <span className="font-mono-num truncate">
-                      {isBn ? 'সর্বশেষ: ' : 'Last: '}
+                    <span className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400 truncate">
+                      {isBn ? 'সর্বশেষ সেভ: ' : 'Last saved: '}
                       {formatDayHeader(extendedSettings.lastAutoBackupMillis, settings.language)},{' '}
                       {formatTime(extendedSettings.lastAutoBackupMillis, settings.language)}
                     </span>
                   )}
                 </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    disabled={backupBusy !== null}
-                    onClick={() => void handleCloudBackupNow()}
-                    className="min-h-[40px] px-3 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 disabled:opacity-60"
-                  >
-                    {backupBusy === 'BACKUP' ? (
-                      <Loader2 size={14} className="animate-spin" />
-                    ) : (
-                      <CloudUpload size={14} />
-                    )}
-                    <span>{isBn ? 'ব্যাকআপ রাখুন' : 'Backup Now'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={backupBusy !== null}
-                    onClick={() => void handleCloudRestoreNow()}
-                    className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-200/80 dark:bg-slate-700 hover:bg-slate-300/80 dark:hover:bg-slate-600 text-slate-800 dark:text-white text-xs font-bold flex items-center justify-center gap-1.5 disabled:opacity-60"
-                  >
-                    {backupBusy === 'RESTORE' ? (
-                      <Loader2 size={14} className="animate-spin" />
-                    ) : (
-                      <CloudDownload size={14} />
-                    )}
-                    <span>{isBn ? 'রিস্টোর করুন' : 'Restore'}</span>
-                  </button>
-                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                  {isBn
+                    ? 'আপনার প্রতিটি হিসাব ও পরিবর্তন স্বয়ংক্রিয়ভাবে ফায়ারবেসে ব্যাকআপ থাকবে এবং লগইন করলে সব আগের ডাটা অটো চলে আসবে।'
+                    : 'Every change is automatically saved to Firebase and all previous data restores automatically when you sign in.'}
+                </p>
               </div>
             )}
           </div>

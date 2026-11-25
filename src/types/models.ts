@@ -217,6 +217,7 @@ export interface HomeCustomization {
 export interface SpendingWayItem {
   id: string;
   name: string;
+  subWays?: string[];
 }
 
 export interface ExtendedSettingsState {

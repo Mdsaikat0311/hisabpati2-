@@ -1,7 +1,7 @@
 {
   "firestore": [
     {
-      "database": "ai-studio-personalhisabpat-8858775f-0a44-4c87-8ba1-fe69a1216c7e",
+      "database": "ai-studio-hisabpati2-7ff8d0dc-7b92-4639-b306-c0388e09c24b",
       "rules": "firestore.rules"
     }
   ],

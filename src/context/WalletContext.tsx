@@ -44,6 +44,8 @@ import {
   deleteAllCloudUserData,
   deleteCloudAccount,
   deleteCloudTransaction,
+  fetchCloudAccounts,
+  fetchCloudTransactions,
   fetchLatestCloudBackup,
   observeCloudAccounts,
   observeCloudTransactions,
@@ -63,6 +65,7 @@ import {
 } from '../firebase';
 
 const STORAGE_KEY = 'hishab_pati_web_state_v1';
+const LAST_SYNCED_UID_KEY = 'hishab_pati_last_synced_uid_v1';
 
 export interface SubScreenEntry {
   screen: SubScreen;
@@ -134,7 +137,7 @@ const DEFAULT_EXTENDED_SETTINGS: ExtendedSettingsState = {
   billReminderEnabled: true,
   creditCardDueEnabled: true,
   weeklySummaryEnabled: true,
-  autoBackupEnabled: false,
+  autoBackupEnabled: true,
   lastAutoBackupMillis: 0,
   screenLockPin: '',
   customBanks: [],
@@ -256,6 +259,7 @@ interface WalletContextValue {
   authReady: boolean;
   guestMode: boolean;
   isLocked: boolean;
+  isCloudSyncing: boolean;
   unlockApp: (pin: string) => boolean;
   enterGuestMode: () => void;
   signInWithGoogle: () => Promise<void>;
@@ -327,6 +331,9 @@ interface WalletContextValue {
   addSpendingWay: (name: string) => SpendingWayItem | null;
   updateSpendingWay: (id: string, name: string) => void;
   deleteSpendingWay: (id: string) => void;
+  addSpendingSubWay: (wayId: string, subName: string) => boolean;
+  updateSpendingSubWay: (wayId: string, oldSubName: string, newSubName: string) => boolean;
+  deleteSpendingSubWay: (wayId: string, subName: string) => void;
 
   saveBudget: (budget: Omit<BudgetEntity, 'id'> & { id?: string }) => void;
   deleteBudget: (budgetId: string) => void;
@@ -410,10 +417,51 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       : false
   );
 
+  const [isCloudSyncing, setIsCloudSyncing] = useState(false);
+  const [hydratedUid, setHydratedUid] = useState<string | null>(null);
+
   const accountsRef = useRef(accounts);
   const transactionsRef = useRef(transactions);
+  const categoriesRef = useRef(categories);
+  const subcategoriesRef = useRef(subcategories);
+  const budgetsRef = useRef(budgets);
+  const debtsRef = useRef(debts);
+  const savingsGoalsRef = useRef(savingsGoals);
+  const settingsRef = useRef(settings);
+  const extendedSettingsRef = useRef(extendedSettings);
+  const homeCustomizationRef = useRef(homeCustomization);
+  const accountSortOptionRef = useRef(accountSortOption);
+
   accountsRef.current = accounts;
   transactionsRef.current = transactions;
+  categoriesRef.current = categories;
+  subcategoriesRef.current = subcategories;
+  budgetsRef.current = budgets;
+  debtsRef.current = debts;
+  savingsGoalsRef.current = savingsGoals;
+  settingsRef.current = settings;
+  extendedSettingsRef.current = extendedSettings;
+  homeCustomizationRef.current = homeCustomization;
+  accountSortOptionRef.current = accountSortOption;
+
+  const lastUploadedSnapshotRef = useRef<string>('');
+  const pendingBackupTimerRef = useRef<number | null>(null);
+  const deletedAccountIdsRef = useRef<Set<string>>(new Set());
+  const deletedTxIdsRef = useRef<Set<string>>(new Set());
+  const isHydratingRef = useRef<boolean>(false);
+
+  const showSnackbar = useCallback(
+    (message: string, actionLabel?: string, onAction?: () => void) => {
+      const id = Date.now();
+      setSnackbar({ id, message, actionLabel, onAction });
+      window.setTimeout(() => {
+        setSnackbar((curr) => (curr?.id === id ? null : curr));
+      }, 4200);
+    },
+    []
+  );
+
+  const dismissSnackbar = useCallback(() => setSnackbar(null), []);
 
   // System dark mode listener
   useEffect(() => {
@@ -480,7 +528,10 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     const unsub = subscribeAuthState((user) => {
       setAuthUser(user);
       setAuthReady(true);
-      if (user) {
+      if (!user) {
+        setHydratedUid(null);
+        lastUploadedSnapshotRef.current = '';
+      } else {
         setGuestMode(false);
         setSettings((prev) => ({
           ...prev,
@@ -491,14 +542,195 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     return unsub;
   }, []);
 
-  // Firestore real-time listeners when authenticated and verified
+  // Auto-restore all previous data from Firebase on login (before enabling auto-backup)
   useEffect(() => {
-    if (!authUser || !authUser.emailVerified) return;
+    if (!authUser || !authUser.emailVerified) {
+      setHydratedUid(null);
+      return;
+    }
+    const uid = authUser.uid;
+    if (hydratedUid === uid || isHydratingRef.current) return;
+
+    let cancelled = false;
+    isHydratingRef.current = true;
+    setIsCloudSyncing(true);
+
+    const hydrate = async () => {
+      try {
+        const prevSyncedUid = (() => {
+          try {
+            return localStorage.getItem(LAST_SYNCED_UID_KEY);
+          } catch {
+            return null;
+          }
+        })();
+
+        const latest = await fetchLatestCloudBackup(uid);
+        if (cancelled) return;
+
+        if (latest) {
+          const payload = parseAndMigrateBackup(latest.jsonString);
+          const localLastBackup = extendedSettingsRef.current.lastAutoBackupMillis || 0;
+          const isDifferentOrFirstLogin = prevSyncedUid !== uid;
+          const cloudIsNewer = latest.info.uploadedAtTimestamp > localLastBackup + 1000;
+
+          if (isDifferentOrFirstLogin || cloudIsNewer) {
+            // If user created offline transactions before their first-ever login, preserve & merge them
+            const cloudTxIds = new Set(payload.transactions.map((t) => t.id));
+            const cloudAccIds = new Set(payload.accounts.map((a) => a.id));
+            const offlineTxs = !prevSyncedUid
+              ? transactionsRef.current.filter((t) => !cloudTxIds.has(t.id))
+              : [];
+            const offlineAccs =
+              !prevSyncedUid && offlineTxs.length > 0
+                ? accountsRef.current.filter(
+                    (a) => !cloudAccIds.has(a.id) && offlineTxs.some((t) => t.accountId === a.id || t.toAccountId === a.id)
+                  )
+                : [];
+
+            const mergedAccounts = [...payload.accounts, ...offlineAccs];
+            const mergedTransactions = [...offlineTxs, ...payload.transactions].sort(
+              (a, b) => b.timestamp - a.timestamp
+            );
+
+            const nextSettings: AppSettingsEntity = payload.settings
+              ? { ...settingsRef.current, ...payload.settings }
+              : settingsRef.current;
+
+            const nextExtended: ExtendedSettingsState = {
+              ...extendedSettingsRef.current,
+              ...(payload.extendedSettings ?? {}),
+              spendingWays:
+                payload.extendedSettings?.spendingWays && payload.extendedSettings.spendingWays.length > 0
+                  ? payload.extendedSettings.spendingWays
+                  : extendedSettingsRef.current.spendingWays,
+              autoBackupEnabled: true,
+              lastAutoBackupMillis: latest.info.uploadedAtTimestamp,
+            };
+
+            const nextHomeCustom: HomeCustomization = payload.homeCustomization
+              ? { ...homeCustomizationRef.current, ...payload.homeCustomization }
+              : homeCustomizationRef.current;
+
+            const nextSort: AccountSortOption = payload.accountSortOption ?? accountSortOptionRef.current;
+
+            setAccounts(mergedAccounts);
+            setTransactions(mergedTransactions);
+            setCategories(payload.categories);
+            setSubcategories(payload.subcategories);
+            setBudgets(payload.budgets);
+            setDebts(payload.debts);
+            setSavingsGoals(payload.savingsGoals);
+            setSettings(nextSettings);
+            setExtendedSettings(nextExtended);
+            setHomeCustomization(nextHomeCustom);
+            setAccountSortOption(nextSort);
+
+            const restoredCanonical = createBackupJson(
+              {
+                settings: nextSettings,
+                extendedSettings: nextExtended,
+                homeCustomization: nextHomeCustom,
+                accountSortOption: nextSort,
+                accounts: mergedAccounts,
+                categories: payload.categories,
+                subcategories: payload.subcategories,
+                transactions: mergedTransactions,
+                budgets: payload.budgets,
+                debts: payload.debts,
+                savingsGoals: payload.savingsGoals,
+              },
+              { compact: true, includeTimestamp: false }
+            );
+
+            if (offlineTxs.length > 0) {
+              // Let auto-backup effect push merged offline + cloud data right after hydration
+              lastUploadedSnapshotRef.current = '';
+              await syncLocalDataToCloud(uid, mergedAccounts, mergedTransactions);
+            } else {
+              lastUploadedSnapshotRef.current = restoredCanonical;
+            }
+
+            if (isDifferentOrFirstLogin || cloudIsNewer) {
+              const isBn = nextSettings.language === 'BANGLA';
+              showSnackbar(
+                isBn
+                  ? 'ফায়ারবেস থেকে আপনার আগের সব ডাটা অটো-রিস্টোর হয়েছে'
+                  : 'All your previous data has been automatically restored from Firebase'
+              );
+            }
+          } else {
+            // Local already belongs to this user and is up-to-date or newer
+            setExtendedSettings((prev) => ({ ...prev, autoBackupEnabled: true }));
+          }
+        } else {
+          // Fallback: check individual Firestore collections if no backup doc existed yet
+          const [cloudAccs, cloudTxs] = await Promise.all([
+            fetchCloudAccounts(uid),
+            fetchCloudTransactions(uid),
+          ]);
+          if (cancelled) return;
+
+          if (cloudAccs.length > 0 || cloudTxs.length > 0) {
+            if (cloudAccs.length > 0) {
+              setAccounts(cloudAccs.sort((a, b) => a.sortOrder - b.sortOrder));
+            }
+            if (cloudTxs.length > 0) {
+              setTransactions(cloudTxs.sort((a, b) => b.timestamp - a.timestamp));
+            }
+            const isBn = settingsRef.current.language === 'BANGLA';
+            showSnackbar(
+              isBn
+                ? 'ফায়ারবেস থেকে আপনার আগের সব ডাটা অটো-রিস্টোর হয়েছে'
+                : 'Previous data automatically restored from Firebase'
+            );
+          } else {
+            // Brand new cloud account: seed initial local state to Firebase
+            await syncLocalDataToCloud(uid, accountsRef.current, transactionsRef.current);
+          }
+          lastUploadedSnapshotRef.current = '';
+          setExtendedSettings((prev) => ({ ...prev, autoBackupEnabled: true }));
+        }
+
+        try {
+          localStorage.setItem(LAST_SYNCED_UID_KEY, uid);
+        } catch {
+          // ignore
+        }
+        if (!cancelled) {
+          setHydratedUid(uid);
+        }
+      } catch {
+        if (!cancelled) {
+          setHydratedUid(uid);
+        }
+      } finally {
+        isHydratingRef.current = false;
+        if (!cancelled) {
+          setIsCloudSyncing(false);
+        }
+      }
+    };
+
+    void hydrate();
+    return () => {
+      cancelled = true;
+      isHydratingRef.current = false;
+    };
+  }, [authUser, authVersion, hydratedUid, showSnackbar]);
+
+  // Real-time Firestore listeners once initial hydration completes
+  useEffect(() => {
+    if (!authUser || !authUser.emailVerified || hydratedUid !== authUser.uid) return;
     const unsubAcc = observeCloudAccounts(authUser.uid, (cloudAccs) => {
       if (cloudAccs.length > 0) {
         setAccounts((localAccs) => {
           const mergedMap = new Map(localAccs.map((a) => [a.id, a]));
-          for (const ca of cloudAccs) mergedMap.set(ca.id, ca);
+          for (const ca of cloudAccs) {
+            if (!deletedAccountIdsRef.current.has(ca.id)) {
+              mergedMap.set(ca.id, ca);
+            }
+          }
           return Array.from(mergedMap.values()).sort((a, b) => a.sortOrder - b.sortOrder);
         });
       }
@@ -507,7 +739,11 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       if (cloudTxs.length > 0) {
         setTransactions((localTxs) => {
           const mergedMap = new Map(localTxs.map((t) => [t.id, t]));
-          for (const ct of cloudTxs) mergedMap.set(ct.id, ct);
+          for (const ct of cloudTxs) {
+            if (!deletedTxIdsRef.current.has(ct.id)) {
+              mergedMap.set(ct.id, ct);
+            }
+          }
           return Array.from(mergedMap.values()).sort((a, b) => b.timestamp - a.timestamp);
         });
       }
@@ -516,48 +752,152 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       unsubAcc();
       unsubTx();
     };
-  }, [authUser, authVersion]);
+  }, [authUser, authVersion, hydratedUid]);
 
-  const showSnackbar = useCallback(
-    (message: string, actionLabel?: string, onAction?: () => void) => {
-      const id = Date.now();
-      setSnackbar({ id, message, actionLabel, onAction });
-      window.setTimeout(() => {
-        setSnackbar((curr) => (curr?.id === id ? null : curr));
-      }, 4200);
-    },
-    []
-  );
+  // Always-on automatic Firebase backup on EVERY change
+  const performAutoBackupNow = useCallback(async () => {
+    if (!authUser || !authUser.emailVerified || hydratedUid !== authUser.uid) return;
+    const snapshotInput = {
+      settings: settingsRef.current,
+      extendedSettings: extendedSettingsRef.current,
+      homeCustomization: homeCustomizationRef.current,
+      accountSortOption: accountSortOptionRef.current,
+      accounts: accountsRef.current,
+      categories: categoriesRef.current,
+      subcategories: subcategoriesRef.current,
+      transactions: transactionsRef.current,
+      budgets: budgetsRef.current,
+      debts: debtsRef.current,
+      savingsGoals: savingsGoalsRef.current,
+    };
+    const canonical = createBackupJson(snapshotInput, { compact: true, includeTimestamp: false });
+    if (canonical === lastUploadedSnapshotRef.current) return;
 
-  const dismissSnackbar = useCallback(() => setSnackbar(null), []);
+    setIsCloudSyncing(true);
+    try {
+      const fullJson = createBackupJson(snapshotInput, { compact: true, includeTimestamp: true });
+      const uploadedAtMillis = await saveCloudBackup(authUser.uid, fullJson, {
+        accountsCount: snapshotInput.accounts.length,
+        transactionsCount: snapshotInput.transactions.length,
+        categoriesCount: snapshotInput.categories.length,
+        debtsCount: snapshotInput.debts.length,
+      });
+      lastUploadedSnapshotRef.current = canonical;
+      setExtendedSettings((prev) => ({
+        ...prev,
+        autoBackupEnabled: true,
+        lastAutoBackupMillis: uploadedAtMillis,
+      }));
+    } catch {
+      // keep local state intact; will retry on next mutation
+    } finally {
+      setIsCloudSyncing(false);
+    }
+  }, [authUser, hydratedUid]);
+
+  useEffect(() => {
+    if (!authUser || !authUser.emailVerified || hydratedUid !== authUser.uid) return;
+
+    const canonical = createBackupJson(
+      {
+        settings,
+        extendedSettings,
+        homeCustomization,
+        accountSortOption,
+        accounts,
+        categories,
+        subcategories,
+        transactions,
+        budgets,
+        debts,
+        savingsGoals,
+      },
+      { compact: true, includeTimestamp: false }
+    );
+
+    if (canonical === lastUploadedSnapshotRef.current) return;
+
+    if (pendingBackupTimerRef.current !== null) {
+      window.clearTimeout(pendingBackupTimerRef.current);
+    }
+    pendingBackupTimerRef.current = window.setTimeout(() => {
+      pendingBackupTimerRef.current = null;
+      void performAutoBackupNow();
+    }, 600);
+
+    return () => {
+      if (pendingBackupTimerRef.current !== null) {
+        window.clearTimeout(pendingBackupTimerRef.current);
+        pendingBackupTimerRef.current = null;
+      }
+    };
+  }, [
+    authUser,
+    hydratedUid,
+    performAutoBackupNow,
+    accounts,
+    transactions,
+    categories,
+    subcategories,
+    budgets,
+    debts,
+    savingsGoals,
+    settings,
+    homeCustomization,
+    accountSortOption,
+    extendedSettings.spendingWays,
+    extendedSettings.customBanks,
+    extendedSettings.customMfsProviders,
+    extendedSettings.profileAvatarId,
+    extendedSettings.profileAvatarBgHex,
+    extendedSettings.profileCustomName,
+    extendedSettings.defaultWalletId,
+    extendedSettings.autoOpenAmountKeypad,
+    extendedSettings.budgetAlertEnabled,
+    extendedSettings.debtAlertEnabled,
+    extendedSettings.billReminderEnabled,
+    extendedSettings.creditCardDueEnabled,
+    extendedSettings.weeklySummaryEnabled,
+  ]);
+
+  // Flush pending backup immediately if tab is backgrounded or closed
+  useEffect(() => {
+    const flushIfPending = () => {
+      if (document.visibilityState === 'hidden' && pendingBackupTimerRef.current !== null) {
+        window.clearTimeout(pendingBackupTimerRef.current);
+        pendingBackupTimerRef.current = null;
+        void performAutoBackupNow();
+      }
+    };
+    const onPageHide = () => {
+      if (pendingBackupTimerRef.current !== null) {
+        window.clearTimeout(pendingBackupTimerRef.current);
+        pendingBackupTimerRef.current = null;
+        void performAutoBackupNow();
+      }
+    };
+    document.addEventListener('visibilitychange', flushIfPending);
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      document.removeEventListener('visibilitychange', flushIfPending);
+      window.removeEventListener('pagehide', onPageHide);
+    };
+  }, [performAutoBackupNow]);
 
   const enterGuestMode = useCallback(() => {
     setGuestMode(true);
   }, []);
 
   const signInWithGoogle = useCallback(async () => {
-    const user = await signInWithGooglePopup();
+    await signInWithGooglePopup();
     setGuestMode(false);
-    if (user && user.emailVerified) {
-      try {
-        await syncLocalDataToCloud(user.uid, accountsRef.current, transactionsRef.current);
-      } catch {
-        // non-fatal initial sync
-      }
-    }
+    setAuthVersion((v) => v + 1);
   }, []);
 
   const signInWithEmail = useCallback(async (email: string, password: string) => {
-    const user = await signInWithEmailPassword(email, password);
+    await signInWithEmailPassword(email, password);
     setGuestMode(false);
     setAuthVersion((v) => v + 1);
-    if (user && user.emailVerified) {
-      try {
-        await syncLocalDataToCloud(user.uid, accountsRef.current, transactionsRef.current);
-      } catch {
-        // non-fatal initial sync
-      }
-    }
   }, []);
 
   const signUpWithEmail = useCallback(async (email: string, password: string) => {
@@ -578,22 +918,26 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     const updated = await reloadCurrentUser();
     setAuthUser(updated);
     setAuthVersion((v) => v + 1);
-    if (updated && updated.emailVerified) {
-      try {
-        await syncLocalDataToCloud(updated.uid, accountsRef.current, transactionsRef.current);
-      } catch {
-        // non-fatal initial sync
-      }
-      return true;
-    }
-    return false;
+    return Boolean(updated && updated.emailVerified);
   }, []);
 
   const signOutUser = useCallback(async () => {
+    if (pendingBackupTimerRef.current !== null) {
+      window.clearTimeout(pendingBackupTimerRef.current);
+      pendingBackupTimerRef.current = null;
+    }
+    await performAutoBackupNow();
     await signOutGoogle();
+    try {
+      localStorage.removeItem(LAST_SYNCED_UID_KEY);
+    } catch {
+      // ignore
+    }
+    setHydratedUid(null);
+    lastUploadedSnapshotRef.current = '';
     setGuestMode(false);
     setSubScreenStack([]);
-  }, []);
+  }, [performAutoBackupNow]);
 
   const unlockApp = useCallback(
     (pin: string) => {
@@ -679,6 +1023,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   const deleteAccount = useCallback(
     (accountId: string) => {
+      deletedAccountIdsRef.current.add(accountId);
       setAccounts((prev) => prev.filter((a) => a.id !== accountId));
       setTransactions((prev) =>
         prev.filter((t) => t.accountId !== accountId && t.toAccountId !== accountId)
@@ -826,6 +1171,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     (txId: string) => {
       const target = transactionsRef.current.find((t) => t.id === txId);
       if (!target) return;
+      deletedTxIdsRef.current.add(txId);
       const nextAccs = applyBalanceEffect(accountsRef.current, target, true);
       setAccounts(nextAccs);
       setTransactions((prev) => prev.filter((t) => t.id !== txId));
@@ -844,6 +1190,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         isBn ? 'লেনদেন মুছে ফেলা হয়েছে' : 'Transaction deleted',
         isBn ? 'পূর্বাবস্থায় ফেরান' : 'Undo',
         () => {
+          deletedTxIdsRef.current.delete(txId);
           setTransactions((prev) => [target, ...prev].sort((a, b) => b.timestamp - a.timestamp));
           const restoredAccs = applyBalanceEffect(accountsRef.current, target, false);
           setAccounts(restoredAccs);
@@ -976,6 +1323,75 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       setExtendedSettings((prev) => ({
         ...prev,
         spendingWays: (prev.spendingWays ?? spendingWays).filter((w) => w.id !== id),
+      }));
+    },
+    [spendingWays]
+  );
+
+  const addSpendingSubWay = useCallback(
+    (wayId: string, subName: string): boolean => {
+      const clean = subName.trim().slice(0, 80);
+      if (!clean) return false;
+      const target = spendingWays.find((w) => w.id === wayId);
+      if (!target) return false;
+      const currentSubs = target.subWays ?? [];
+      if (currentSubs.some((s) => s.toLowerCase() === clean.toLowerCase())) {
+        return false;
+      }
+      setExtendedSettings((prev) => ({
+        ...prev,
+        spendingWays: (prev.spendingWays ?? spendingWays).map((w) =>
+          w.id === wayId ? { ...w, subWays: [...(w.subWays ?? []), clean] } : w
+        ),
+      }));
+      return true;
+    },
+    [spendingWays]
+  );
+
+  const updateSpendingSubWay = useCallback(
+    (wayId: string, oldSubName: string, newSubName: string): boolean => {
+      const clean = newSubName.trim().slice(0, 80);
+      if (!clean) return false;
+      const target = spendingWays.find((w) => w.id === wayId);
+      if (!target) return false;
+      const currentSubs = target.subWays ?? [];
+      if (
+        oldSubName.toLowerCase() !== clean.toLowerCase() &&
+        currentSubs.some((s) => s.toLowerCase() === clean.toLowerCase())
+      ) {
+        return false;
+      }
+      setExtendedSettings((prev) => ({
+        ...prev,
+        spendingWays: (prev.spendingWays ?? spendingWays).map((w) =>
+          w.id === wayId
+            ? {
+                ...w,
+                subWays: (w.subWays ?? []).map((s) =>
+                  s === oldSubName ? clean : s
+                ),
+              }
+            : w
+        ),
+      }));
+      return true;
+    },
+    [spendingWays]
+  );
+
+  const deleteSpendingSubWay = useCallback(
+    (wayId: string, subName: string) => {
+      setExtendedSettings((prev) => ({
+        ...prev,
+        spendingWays: (prev.spendingWays ?? spendingWays).map((w) =>
+          w.id === wayId
+            ? {
+                ...w,
+                subWays: (w.subWays ?? []).filter((s) => s !== subName),
+              }
+            : w
+        ),
       }));
     },
     [spendingWays]
@@ -1252,6 +1668,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     () =>
       createBackupJson({
         settings,
+        extendedSettings,
+        homeCustomization,
+        accountSortOption,
         accounts,
         categories,
         subcategories,
@@ -1260,7 +1679,19 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         debts,
         savingsGoals,
       }),
-    [accounts, budgets, categories, debts, savingsGoals, settings, subcategories, transactions]
+    [
+      accountSortOption,
+      accounts,
+      budgets,
+      categories,
+      debts,
+      extendedSettings,
+      homeCustomization,
+      savingsGoals,
+      settings,
+      subcategories,
+      transactions,
+    ]
   );
 
   const exportCsvBackup = useCallback(
@@ -1296,6 +1727,15 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       if (payload.settings) {
         setSettings((prev) => ({ ...prev, ...payload.settings }));
       }
+      if (payload.extendedSettings) {
+        setExtendedSettings((prev) => ({ ...prev, ...payload.extendedSettings }));
+      }
+      if (payload.homeCustomization) {
+        setHomeCustomization((prev) => ({ ...prev, ...payload.homeCustomization }));
+      }
+      if (payload.accountSortOption) {
+        setAccountSortOption(payload.accountSortOption);
+      }
       onStage?.('RECONCILING_BALANCES', 92, 'Reconciling wallet balances...');
       if (authUser) {
         await syncLocalDataToCloud(authUser.uid, payload.accounts, payload.transactions);
@@ -1310,16 +1750,44 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     if (!authUser.emailVerified) {
       throw new Error('Please verify your email address first before backing up to Firebase.');
     }
-    const json = exportJsonBackup();
+    const json = createBackupJson(
+      {
+        settings,
+        extendedSettings,
+        homeCustomization,
+        accountSortOption,
+        accounts,
+        categories,
+        subcategories,
+        transactions,
+        budgets,
+        debts,
+        savingsGoals,
+      },
+      { compact: true, includeTimestamp: true }
+    );
     await syncLocalDataToCloud(authUser.uid, accounts, transactions);
-    await saveCloudBackup(authUser.uid, json, {
+    const uploadedAtMillis = await saveCloudBackup(authUser.uid, json, {
       accountsCount: accounts.length,
       transactionsCount: transactions.length,
       categoriesCount: categories.length,
       debtsCount: debts.length,
     });
-    updateExtendedSettings({ lastAutoBackupMillis: Date.now() });
-  }, [accounts, authUser, categories.length, debts.length, exportJsonBackup, transactions, updateExtendedSettings]);
+    updateExtendedSettings({ autoBackupEnabled: true, lastAutoBackupMillis: uploadedAtMillis });
+  }, [
+    accountSortOption,
+    accounts,
+    authUser,
+    categories,
+    debts,
+    extendedSettings,
+    homeCustomization,
+    savingsGoals,
+    settings,
+    subcategories,
+    transactions,
+    updateExtendedSettings,
+  ]);
 
   const fetchCloudBackupPreview = useCallback(async () => {
     if (!authUser) throw new Error('Please sign in first to access Cloud Backups.');
@@ -1335,7 +1803,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       throw new Error('Please verify your email address first.');
     }
     await syncLocalDataToCloud(authUser.uid, accounts, transactions);
-  }, [accounts, authUser, transactions]);
+    await performAutoBackupNow();
+  }, [accounts, authUser, performAutoBackupNow, transactions]);
 
   const clearAllData = useCallback(
     async (includeCloud: boolean) => {
@@ -1383,6 +1852,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     authReady,
     guestMode,
     isLocked,
+    isCloudSyncing,
     unlockApp,
     enterGuestMode,
     signInWithGoogle,
@@ -1454,6 +1924,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     addSpendingWay,
     updateSpendingWay,
     deleteSpendingWay,
+    addSpendingSubWay,
+    updateSpendingSubWay,
+    deleteSpendingSubWay,
 
     saveBudget,
     deleteBudget,

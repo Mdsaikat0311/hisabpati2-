@@ -55,6 +55,58 @@ export function applyBalanceEffect(
   });
 }
 
+export const PERSONAL_SOURCE_ACCOUNT_ID = '__PERSONAL_POOL__';
+
+export function isPersonalWayLabel(label: string): boolean {
+  const lower = label.trim().toLowerCase();
+  return lower === 'পার্সোনাল' || lower === 'personal';
+}
+
+export function computePersonalExpenseSummary(
+  transactions: TransactionEntity[],
+  startMillis?: number,
+  endMillis?: number
+): {
+  takenForPersonal: number;
+  addedToPersonal: number;
+  reallocatedFromPersonal: number;
+  netPersonalExpense: number;
+} {
+  let takenForPersonal = 0;
+  let addedToPersonal = 0;
+  let reallocatedFromPersonal = 0;
+
+  for (const tx of transactions) {
+    if (startMillis !== undefined && tx.timestamp < startMillis) continue;
+    if (endMillis !== undefined && tx.timestamp > endMillis) continue;
+
+    if (tx.accountId === PERSONAL_SOURCE_ACCOUNT_ID) {
+      if (tx.type === 'INCOME' || tx.type === 'BORROW') {
+        addedToPersonal += tx.amount;
+      } else if (tx.type === 'EXPENSE' || tx.type === 'LEND') {
+        reallocatedFromPersonal += tx.amount;
+      }
+      continue;
+    }
+
+    if (tx.type !== 'EXPENSE' && tx.type !== 'LEND') continue;
+    const label = tx.subcategory || tx.category || '';
+    if (isPersonalWayLabel(label)) {
+      takenForPersonal += tx.amount;
+    }
+  }
+
+  return {
+    takenForPersonal: Math.round(takenForPersonal * 100) / 100,
+    addedToPersonal: Math.round(addedToPersonal * 100) / 100,
+    reallocatedFromPersonal: Math.round(reallocatedFromPersonal * 100) / 100,
+    netPersonalExpense: Math.max(
+      0,
+      Math.round((takenForPersonal + addedToPersonal - reallocatedFromPersonal) * 100) / 100
+    ),
+  };
+}
+
 export function isEligibleExpense(tx: TransactionEntity): boolean {
   if (tx.type !== 'EXPENSE') return false;
   if (tx.notes.includes('[EXCLUDE_BUDGET]')) return false;
